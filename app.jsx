@@ -266,6 +266,33 @@ function computeLearningPlan({ schedule, exams, subjects, currentWeekType }) {
   return { targetDate: targetISO, targetLabel: fmtDateLong(targetISO), items: list };
 }
 
+const MASTERY_TIERS = [
+  { max: 1, label: "Unsicher", color: "var(--rose)", bg: "var(--rose-soft)" },
+  { max: 3, label: "Wird besser", color: "var(--amber)", bg: "var(--amber-soft)" },
+  { max: 6, label: "Sitzt", color: "var(--teal)", bg: "var(--teal-soft)" },
+];
+function masteryTier(box) {
+  const b = box || 1;
+  return MASTERY_TIERS.find((t) => b <= t.max) || MASTERY_TIERS[MASTERY_TIERS.length - 1];
+}
+// Sammelt alle Begriffe eines oder mehrerer Fächer, sortiert von "am wenigsten sicher" nach "sitzt".
+// Nutzt die srsBox aus dem Lernmodus (Leitner-System) als Mastery-Signal – keine neuen Daten nötig.
+function computeWeakSpots(entries, subjects) {
+  const bySubject = new Map((subjects || []).map((s) => [s.id, s]));
+  const terms = entries.flatMap((e) => (e.terms || []).map((t) => ({
+    ...t,
+    entryDate: e.date,
+    subjectId: e.subjectId,
+    subject: bySubject.get(e.subjectId) || null,
+  })));
+  terms.sort((a, b) => {
+    const boxDiff = (a.srsBox || 1) - (b.srsBox || 1);
+    if (boxDiff !== 0) return boxDiff;
+    return (a.srsDue || "").localeCompare(b.srsDue || "");
+  });
+  return terms;
+}
+
 function relevantEntriesForExam(exam, entries) {
   const subjectEntries = entries
     .filter((e) => e.subjectId === exam.subjectId && e.date <= exam.date)
@@ -276,6 +303,69 @@ function relevantEntriesForExam(exam, entries) {
   }
   if (exam.type === "Ex") return subjectEntries.slice(0, 2).reverse();
   return subjectEntries.slice(0, 1);
+}
+
+// Proaktiver Lernplan: verteilt den relevanten Stoff auf die verfügbaren Tage bis zur Prüfung,
+// statt nur reaktiv "was ist morgen" zu zeigen. Rein algorithmisch (kein KI-Call), damit immer
+// zuverlässig und ohne Wartezeit ein Plan entsteht.
+function computeStudyPlan(exam, relevantEntries) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const examDate = new Date(exam.date + "T00:00:00");
+  const totalDays = Math.round((examDate - today) / 86400000);
+
+  if (totalDays <= 0) return { days: [], tooLate: true, reason: "Die Prüfung ist heute oder vorbei – jetzt nur noch schnell wiederholen." };
+  if (!relevantEntries.length) return { days: [], tooLate: true, reason: "Noch keine Hefteinträge zu diesem Stoff vorhanden." };
+
+  const sorted = [...relevantEntries].sort((a, b) => a.date.localeCompare(b.date));
+  // Ziel: ~30% der verfügbaren Tage (mind. 1, max. 3) für Wiederholung reservieren, Rest für neuen Stoff.
+  const reviewDaysTarget = Math.min(3, Math.max(1, Math.round(totalDays * 0.3)));
+  const workDays = Math.min(Math.max(totalDays - reviewDaysTarget, 0), sorted.length);
+
+  const days = [];
+  let dayOffset = 0;
+
+  if (workDays > 0) {
+    const chunkSize = Math.ceil(sorted.length / workDays);
+    for (let i = 0; i < workDays; i++) {
+      const chunk = sorted.slice(i * chunkSize, (i + 1) * chunkSize);
+      if (chunk.length === 0) continue;
+      days.push({
+        date: addDays(today, dayOffset).toISOString().slice(0, 10),
+        phase: "erarbeiten",
+        entries: chunk,
+        title: `Stoff durcharbeiten (${chunk.length} Eintrag${chunk.length > 1 ? "e" : ""})`,
+      });
+      dayOffset++;
+    }
+  }
+
+  while (dayOffset < totalDays) {
+    days.push({
+      date: addDays(today, dayOffset).toISOString().slice(0, 10),
+      phase: "festigen",
+      entries: sorted,
+      title: "Zwischenwiederholung – gesamten Stoff überfliegen",
+    });
+    dayOffset++;
+  }
+
+  if (days.length > 0) days[days.length - 1].title = "Finale Wiederholung – alles nochmal komplett durchgehen";
+  return { days, tooLate: false };
+}
+
+// Fasst aufeinanderfolgende Tage mit identischer Aufgabe zu einem Zeitraum zusammen (nur fürs UI).
+function groupPlanDays(days) {
+  const groups = [];
+  for (const d of days) {
+    const last = groups[groups.length - 1];
+    if (last && last.title === d.title && last.phase === d.phase) {
+      last.endDate = d.date;
+      last.count++;
+    } else {
+      groups.push({ startDate: d.date, endDate: d.date, phase: d.phase, title: d.title, entries: d.entries, count: 1 });
+    }
+  }
+  return groups;
 }
 
 function downscaleImage(file, maxW = 900, quality = 0.72) {
@@ -837,6 +927,22 @@ function Dashboard({ data, subjects, onOpenSubject, onUpload, onGoPage }) {
     name: s.name, count: data.entries.filter((e) => e.subjectId === s.id).length, fill: s.color,
   })), [subjects, data.entries]);
 
+  const todayPlanTasks = useMemo(() => {
+    const today = todayISO();
+    const tasks = [];
+    data.exams.filter((e) => daysUntil(e.date) >= 0).forEach((exam) => {
+      const relevant = relevantEntriesForExam(exam, data.entries);
+      const plan = computeStudyPlan(exam, relevant);
+      if (plan.tooLate) return;
+      const todayEntry = plan.days.find((d) => d.date === today);
+      if (todayEntry) {
+        const subj = subjects.find((s) => s.id === exam.subjectId);
+        tasks.push({ exam, subject: subj, title: todayEntry.title });
+      }
+    });
+    return tasks;
+  }, [data.exams, data.entries, subjects]);
+
   const firstName = data.settings.name?.split(" ")[0];
   const hour = new Date().getHours();
   const greeting = hour < 11 ? "Guten Morgen" : hour < 17 ? "Hallo" : "Guten Abend";
@@ -884,6 +990,31 @@ function Dashboard({ data, subjects, onOpenSubject, onUpload, onGoPage }) {
           </div>
         </div>
       </div>
+
+      {todayPlanTasks.length > 0 && (
+        <div className="sp-card p-5 mb-5" style={{ background: "var(--teal-soft)" }}>
+          <div className="flex items-center gap-2 mb-3">
+            <CalendarDays size={15} style={{ color: "var(--teal)" }} />
+            <p className="text-sm font-semibold" style={{ color: "var(--teal)" }}>Laut Lernplan heute</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {todayPlanTasks.map((t, i) => (
+              <button
+                key={i}
+                onClick={() => onOpenSubject(t.exam.subjectId)}
+                className="sp-card sp-card-hover flex items-center gap-2.5 pl-2 pr-3.5 py-2 text-left"
+                style={{ borderRadius: 999 }}
+              >
+                <Avatar subject={t.subject} size={30} />
+                <div>
+                  <p className="text-sm font-semibold leading-tight">{t.subject?.name}</p>
+                  <p className="text-[11px] leading-tight" style={{ color: "var(--text-muted)" }}>{t.title} · für {t.exam.title}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
         {/* Prüfungen */}
@@ -982,6 +1113,12 @@ function Dashboard({ data, subjects, onOpenSubject, onUpload, onGoPage }) {
           </div>
         </div>
       </div>
+
+      <WeakSpotHeatmap
+        entries={data.entries}
+        subjects={subjects}
+        onOpenSubject={onOpenSubject}
+      />
     </div>
   );
 }
@@ -1821,6 +1958,89 @@ function EntryEditModal({ open, onClose, entry, subjects, onSave, onDelete }) {
   );
 }
 
+function WeakSpotHeatmap({ entries, subjects, onPracticeWeak, onOpenSubject }) {
+  const weakSpots = useMemo(() => computeWeakSpots(entries, subjects), [entries, subjects]);
+  const [selected, setSelected] = useState(null);
+
+  if (weakSpots.length === 0) {
+    return (
+      <div className="sp-card p-5 mt-4">
+        <SectionTitle icon={Flame} title="Schwachstellen" />
+        <EmptyState icon={Flame} title="Noch keine Daten" subtitle="Sobald du Begriffe im Lernmodus übst, siehst du hier, welche Themen noch nicht sitzen." />
+      </div>
+    );
+  }
+
+  const weakest = weakSpots.slice(0, 5);
+  const tierCounts = MASTERY_TIERS.map((tier) => ({
+    ...tier,
+    count: weakSpots.filter((t) => masteryTier(t.srsBox).label === tier.label).length,
+  }));
+
+  return (
+    <div className="sp-card p-5 mt-4">
+      <SectionTitle icon={Flame} title="Schwachstellen" />
+
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        {tierCounts.map((t) => (
+          <div key={t.label} className="flex items-center gap-1.5 text-xs" style={{ color: "var(--text-muted)" }}>
+            <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: t.color }} />
+            {t.label} ({t.count})
+          </div>
+        ))}
+      </div>
+
+      <div className="grid gap-1.5 mb-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(22px, 1fr))" }}>
+        {weakSpots.map((t, i) => {
+          const tier = masteryTier(t.srsBox);
+          return (
+            <button
+              key={t.id || i}
+              onClick={() => setSelected(t)}
+              title={t.term}
+              className="rounded-md transition-transform hover:scale-110"
+              style={{ aspectRatio: "1", background: tier.color, opacity: selected === t ? 1 : 0.85, outline: selected === t ? "2px solid var(--text)" : "none" }}
+            />
+          );
+        })}
+      </div>
+
+      {selected && (
+        <div className="sp-card p-3.5 mb-4 sp-fade-in flex items-start justify-between gap-3" style={{ background: masteryTier(selected.srsBox).bg }}>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold">{selected.term}</p>
+            <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{selected.def}</p>
+            {selected.subject && <p className="text-[11px] mt-1" style={{ color: "var(--text-faint)" }}>{selected.subject.name}</p>}
+          </div>
+          <Chip color={selected.srsBox <= 1 ? "rose" : selected.srsBox <= 3 ? "amber" : "teal"}>{masteryTier(selected.srsBox).label}</Chip>
+        </div>
+      )}
+
+      <p className="text-xs font-semibold mb-2" style={{ color: "var(--text-muted)" }}>AM WENIGSTEN SICHER</p>
+      <div className="space-y-1.5">
+        {weakest.map((t, i) => (
+          <div key={t.id || i} className="flex items-center gap-2.5 py-1.5">
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: masteryTier(t.srsBox).color }} />
+            <button
+              onClick={() => t.subject && onOpenSubject && onOpenSubject(t.subjectId)}
+              className="flex-1 min-w-0 text-left"
+              disabled={!onOpenSubject}
+            >
+              <p className="text-sm truncate">{t.term}{t.subject ? <span style={{ color: "var(--text-faint)" }}> · {t.subject.name}</span> : ""}</p>
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {onPracticeWeak && (
+        <button onClick={onPracticeWeak} className="sp-btn-primary w-full py-2.5 text-sm mt-4 flex items-center justify-center gap-1.5">
+          <Flame size={14} />Schwachstellen im Lernmodus üben
+        </button>
+      )}
+    </div>
+  );
+}
+
 function TutorChat({ subject, scopedEntries, scopeLabel, settings, messages, onSendMessage, onClearChat }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -2199,6 +2419,14 @@ function SubjectDetail({ subject, data, setData, onBack, onUpload }) {
         </div>
       )}
 
+      {tab === "stats" && (
+        <WeakSpotHeatmap
+          entries={entries}
+          subjects={null}
+          onPracticeWeak={() => { setTab("quiz"); setQuizMode("learn"); }}
+        />
+      )}
+
       {tab === "topics" && (
         allTerms.length === 0 ? <EmptyState icon={Tags} title="Noch keine Themen erfasst" /> : (
           <div className="grid sm:grid-cols-2 gap-3">
@@ -2268,9 +2496,49 @@ function ExamModal({ open, onClose, onSave, subjects }) {
   );
 }
 
+function StudyPlanView({ exam, relevantEntries }) {
+  const plan = useMemo(() => computeStudyPlan(exam, relevantEntries), [exam, relevantEntries]);
+  if (plan.tooLate) {
+    return <p className="text-xs mt-2.5 sp-fade-in" style={{ color: "var(--text-faint)" }}>{plan.reason}</p>;
+  }
+  const groups = groupPlanDays(plan.days);
+  const today = todayISO();
+  return (
+    <div className="mt-3 space-y-2 sp-fade-in">
+      {groups.map((g, i) => {
+        const isCurrent = today >= g.startDate && today <= g.endDate;
+        const rangeLabel = g.startDate === g.endDate ? fmtDateLong(g.startDate) : `${fmtDate(g.startDate)} – ${fmtDate(g.endDate)}`;
+        return (
+          <div
+            key={i}
+            className="flex items-start gap-3 p-3 rounded-xl"
+            style={{ background: isCurrent ? "var(--accent-soft)" : "var(--bg-soft)", border: isCurrent ? "1px solid var(--accent)" : "1px solid transparent" }}
+          >
+            <div className="w-2 h-2 rounded-full mt-1.5 shrink-0" style={{ background: g.phase === "festigen" ? "var(--teal)" : "var(--accent)" }} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-xs font-semibold" style={{ color: isCurrent ? "var(--accent)" : "var(--text)" }}>{rangeLabel}</p>
+                {isCurrent && <Chip color="accent">heute</Chip>}
+                {g.count > 1 && <span className="text-[11px]" style={{ color: "var(--text-faint)" }}>({g.count} Tage)</span>}
+              </div>
+              <p className="text-sm mt-0.5">{g.title}</p>
+              {g.phase === "erarbeiten" && (
+                <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+                  {g.entries.map((e) => fmtDate(e.date)).join(", ")}
+                </p>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ExamsPage({ data, setData, subjects, onOpenSubject }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
+  const [planExpandedId, setPlanExpandedId] = useState(null);
   const list = [...data.exams].sort((a, b) => a.date.localeCompare(b.date));
   const addExam = (exam) => setData((d) => ({ ...d, exams: [...d.exams, exam] }));
   const removeExam = (id) => setData((d) => ({ ...d, exams: d.exams.filter((e) => e.id !== id) }));
@@ -2291,6 +2559,7 @@ function ExamsPage({ data, setData, subjects, onOpenSubject }) {
             const past = daysUntil(e.date) < 0;
             const relevant = relevantEntriesForExam(e, data.entries);
             const expanded = expandedId === e.id;
+            const planExpanded = planExpandedId === e.id;
             return (
               <div key={e.id} className="sp-card p-4" style={{ opacity: past ? 0.5 : 1 }}>
                 <div className="flex items-center gap-4">
@@ -2307,10 +2576,18 @@ function ExamsPage({ data, setData, subjects, onOpenSubject }) {
                     <button onClick={() => removeExam(e.id)} className="p-1.5 rounded-full sp-nav-item"><Trash2 size={14} style={{ color: "var(--text-faint)" }} /></button>
                   </div>
                 </div>
-                <button onClick={() => setExpandedId(expanded ? null : e.id)} className="flex items-center gap-1.5 mt-2.5 text-xs font-medium" style={{ color: "var(--accent)" }}>
-                  <Layers size={12} /> {relevant.length === 0 ? "Kein passender Lernstoff gefunden" : `${relevant.length} relevante${relevant.length === 1 ? "r" : ""} Hefteintrag${relevant.length === 1 ? "" : "e"}`}
-                  {relevant.length > 0 && (expanded ? <ChevronLeft size={12} style={{ transform: "rotate(-90deg)" }} /> : <ChevronRight size={12} />)}
-                </button>
+                <div className="flex items-center gap-4 mt-2.5 flex-wrap">
+                  <button onClick={() => setExpandedId(expanded ? null : e.id)} className="flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--accent)" }}>
+                    <Layers size={12} /> {relevant.length === 0 ? "Kein passender Lernstoff gefunden" : `${relevant.length} relevante${relevant.length === 1 ? "r" : ""} Hefteintrag${relevant.length === 1 ? "" : "e"}`}
+                    {relevant.length > 0 && (expanded ? <ChevronLeft size={12} style={{ transform: "rotate(-90deg)" }} /> : <ChevronRight size={12} />)}
+                  </button>
+                  {!past && relevant.length > 0 && (
+                    <button onClick={() => setPlanExpandedId(planExpanded ? null : e.id)} className="flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--teal)" }}>
+                      <CalendarDays size={12} /> Lernplan
+                      {planExpanded ? <ChevronLeft size={12} style={{ transform: "rotate(-90deg)" }} /> : <ChevronRight size={12} />}
+                    </button>
+                  )}
+                </div>
                 {expanded && relevant.length > 0 && (
                   <div className="mt-2.5 space-y-1.5 sp-fade-in">
                     {relevant.map((r) => (
@@ -2321,6 +2598,7 @@ function ExamsPage({ data, setData, subjects, onOpenSubject }) {
                     ))}
                   </div>
                 )}
+                {planExpanded && <StudyPlanView exam={e} relevantEntries={relevant} />}
               </div>
             );
           })}
