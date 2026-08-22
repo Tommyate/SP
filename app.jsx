@@ -782,6 +782,7 @@ function seedSchedule(subjects) {
 
 const DEFAULT_SETTINGS = {
   name: "", grade: "9", school: "", className: "", theme: "light", currentWeekType: "A",
+  onboarded: false,
   // KI-Anbieter: "claude" nutzt die in StudyPilot eingebaute, kostenlose Claude-Anbindung (kein Key nötig).
   // "openrouter" nutzt ein kostenloses Modell über den eigenen OpenRouter-Key.
   aiProvider: (typeof window !== "undefined" && window.STUDYPILOT_STANDALONE) ? "openrouter" : "claude",
@@ -3120,6 +3121,136 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+const SUGGESTED_SUBJECTS = [
+  "Mathe", "Deutsch", "Englisch", "Französisch", "Latein", "Spanisch",
+  "Geschichte", "Erdkunde", "Politik/Sozialkunde", "Physik", "Chemie", "Biologie",
+  "Sport", "Kunst", "Musik", "Informatik", "Religion/Ethik",
+];
+
+function OnboardingWizard({ onComplete }) {
+  const [step, setStep] = useState(0);
+  const [profile, setProfile] = useState({ name: "", grade: "9", school: "", className: "" });
+  const [selectedSubjects, setSelectedSubjects] = useState([]);
+  const [customSubject, setCustomSubject] = useState("");
+
+  const toggleSubject = (name) => {
+    setSelectedSubjects((prev) => (prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name]));
+  };
+  const addCustom = () => {
+    const name = customSubject.trim();
+    if (name && !selectedSubjects.includes(name)) setSelectedSubjects((prev) => [...prev, name]);
+    setCustomSubject("");
+  };
+
+  const buildSubjects = () => selectedSubjects.map((name, i) => ({
+    id: uid(), name, color: SUBJECT_PALETTE[i % SUBJECT_PALETTE.length], quizFrequency: "occasional",
+  }));
+
+  const finish = (startPage) => onComplete({ profile, subjects: buildSubjects(), schedule: [], startPage });
+
+  const loadDemo = () => {
+    const demoSubjects = seedSubjects();
+    onComplete({ profile: { name: "", grade: "9", school: "", className: "" }, subjects: demoSubjects, schedule: seedSchedule(demoSubjects), startPage: "dashboard" });
+  };
+
+  return (
+    <div className="sp-root min-h-screen flex items-center justify-center p-5" data-theme="light">
+      <style>{THEME_CSS}</style>
+      <div className="sp-card w-full max-w-md p-7 sp-pop-in">
+        {step === 0 && (
+          <div className="text-center">
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-5" style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}>
+              <Sparkles size={26} color="#fff" />
+            </div>
+            <h1 className="sp-font-display font-bold text-2xl mb-2">Willkommen bei StudyPilot</h1>
+            <p className="text-sm mb-6" style={{ color: "var(--text-muted)" }}>Dein persönlicher KI-Schulassistent. Kurz einrichten, dauert unter einer Minute.</p>
+            <button onClick={() => setStep(1)} className="sp-btn-primary w-full py-3 text-sm mb-3">Los geht's</button>
+            <button onClick={loadDemo} className="text-xs" style={{ color: "var(--text-faint)" }}>Nur schnell testen? Demo-Daten laden</button>
+          </div>
+        )}
+
+        {step === 1 && (
+          <div>
+            <p className="text-xs font-semibold mb-1" style={{ color: "var(--accent)" }}>SCHRITT 1 VON 3</p>
+            <h2 className="sp-font-display font-bold text-xl mb-5">Wer bist du?</h2>
+            <Field label="Name">
+              <input autoFocus className="sp-input w-full px-3 py-2.5 text-sm" value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} placeholder="Dein Name" />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Klassenstufe">
+                <input className="sp-input w-full px-3 py-2.5 text-sm" value={profile.grade} onChange={(e) => setProfile({ ...profile, grade: e.target.value })} placeholder="9" />
+              </Field>
+              <Field label="Klasse (optional)">
+                <input className="sp-input w-full px-3 py-2.5 text-sm" value={profile.className} onChange={(e) => setProfile({ ...profile, className: e.target.value })} placeholder="9b" />
+              </Field>
+            </div>
+            <Field label="Schule (optional)">
+              <input className="sp-input w-full px-3 py-2.5 text-sm" value={profile.school} onChange={(e) => setProfile({ ...profile, school: e.target.value })} placeholder="Gymnasium ..." />
+            </Field>
+            <button onClick={() => setStep(2)} disabled={!profile.name.trim()} className="sp-btn-primary w-full py-3 text-sm mt-2 disabled:opacity-40">Weiter</button>
+          </div>
+        )}
+
+        {step === 2 && (
+          <div>
+            <p className="text-xs font-semibold mb-1" style={{ color: "var(--accent)" }}>SCHRITT 2 VON 3</p>
+            <h2 className="sp-font-display font-bold text-xl mb-1">Welche Fächer hast du?</h2>
+            <p className="text-xs mb-4" style={{ color: "var(--text-faint)" }}>Tippe alle zutreffenden an, eigene Fächer kannst du unten ergänzen.</p>
+            <div className="flex flex-wrap gap-2 mb-4 max-h-56 overflow-y-auto sp-scroll">
+              {SUGGESTED_SUBJECTS.map((name) => {
+                const active = selectedSubjects.includes(name);
+                return (
+                  <button
+                    key={name}
+                    onClick={() => toggleSubject(name)}
+                    className="px-3 py-1.5 rounded-full text-xs font-medium transition-all"
+                    style={{ background: active ? "var(--accent)" : "var(--bg-soft)", color: active ? "#fff" : "var(--text-muted)", border: "1px solid " + (active ? "var(--accent)" : "var(--border)") }}
+                  >
+                    {active && <Check size={11} style={{ display: "inline", marginRight: 4, verticalAlign: -1 }} />}{name}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex gap-2 mb-3">
+              <input className="sp-input flex-1 px-3 py-2 text-sm" placeholder="Eigenes Fach hinzufügen" value={customSubject} onChange={(e) => setCustomSubject(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addCustom()} />
+              <button onClick={addCustom} className="sp-btn-secondary px-3.5 py-2 text-sm">Hinzufügen</button>
+            </div>
+            {selectedSubjects.filter((s) => !SUGGESTED_SUBJECTS.includes(s)).length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {selectedSubjects.filter((s) => !SUGGESTED_SUBJECTS.includes(s)).map((name) => (
+                  <Chip key={name} color="accent">
+                    {name} <button onClick={() => toggleSubject(name)} style={{ marginLeft: 4 }}><X size={10} /></button>
+                  </Chip>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2 mt-2">
+              <button onClick={() => setStep(1)} className="sp-btn-secondary px-4 py-3 text-sm"><ArrowLeft size={15} /></button>
+              <button onClick={() => setStep(3)} disabled={selectedSubjects.length === 0} className="sp-btn-primary flex-1 py-3 text-sm disabled:opacity-40">
+                Weiter ({selectedSubjects.length} Fach{selectedSubjects.length === 1 ? "" : "er"})
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="text-center">
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-5" style={{ background: "var(--teal-soft)" }}>
+              <CheckCircle2 size={26} style={{ color: "var(--teal)" }} />
+            </div>
+            <h2 className="sp-font-display font-bold text-xl mb-2">Fast fertig{profile.name ? `, ${profile.name.split(" ")[0]}` : ""}!</h2>
+            <p className="text-sm mb-6" style={{ color: "var(--text-muted)" }}>
+              {selectedSubjects.length} Fach{selectedSubjects.length === 1 ? "" : "er"} hinzugefügt. Möchtest du jetzt gleich deinen Stundenplan einrichten?
+            </p>
+            <button onClick={() => finish("schedule")} className="sp-btn-primary w-full py-3 text-sm mb-3">Stundenplan jetzt einrichten</button>
+            <button onClick={() => finish("dashboard")} className="sp-btn-secondary w-full py-3 text-sm">Später einrichten</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StudyPilotAppInner() {
   const [loaded, setLoaded] = useState(false);
   const [data, setData] = useState({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {} });
@@ -3158,12 +3289,11 @@ function StudyPilotAppInner() {
         }
         let subjects = sanitizeSubjects(loadedData.subjects);
         let schedule = sanitizeSchedule(loadedData.schedule);
-        if (!subjects || subjects.length === 0) {
-          subjects = seedSubjects();
-          schedule = seedSchedule(subjects);
-        }
+        // Migration: bestehende Nutzer mit echten Fächern gelten automatisch als "onboarded",
+        // auch wenn das Flag selbst (aus einer Version vor diesem Update) noch fehlt.
+        const alreadyOnboarded = loadedData.settings?.onboarded === true || subjects.length > 0;
         setData({
-          settings: { ...DEFAULT_SETTINGS, ...(loadedData.settings || {}) },
+          settings: { ...DEFAULT_SETTINGS, ...(loadedData.settings || {}), onboarded: alreadyOnboarded },
           subjects,
           schedule: schedule || [],
           exams: sanitizeExams(loadedData.exams),
@@ -3172,8 +3302,7 @@ function StudyPilotAppInner() {
           chats: (loadedData.chats && typeof loadedData.chats === "object" && !Array.isArray(loadedData.chats)) ? loadedData.chats : {},
         });
       } catch (e) {
-        const subjects = seedSubjects();
-        setData({ settings: DEFAULT_SETTINGS, subjects, schedule: seedSchedule(subjects), exams: [], homework: [], entries: [], chats: {} });
+        setData({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {} });
       } finally {
         setLoaded(true);
       }
@@ -3225,6 +3354,20 @@ function StudyPilotAppInner() {
         </div>
       </div>
     );
+  }
+
+  const handleOnboardingComplete = ({ profile, subjects: newSubjects, schedule: newSchedule, startPage }) => {
+    setData((d) => ({
+      ...d,
+      settings: { ...d.settings, ...profile, onboarded: true },
+      subjects: newSubjects,
+      schedule: newSchedule || [],
+    }));
+    setPage(startPage || "dashboard");
+  };
+
+  if (loaded && !data.settings.onboarded) {
+    return <OnboardingWizard onComplete={handleOnboardingComplete} />;
   }
 
   const activeSubject = subjects.find((s) => s.id === activeSubjectId);
