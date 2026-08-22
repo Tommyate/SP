@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>StudyPilot</title>
+<meta name="description" content="Dein persönlicher KI-Schulassistent" />
+
+<!-- PWA / Home-Bildschirm -->
+<link rel="manifest" href="./manifest.json" />
+<meta name="theme-color" content="#5B57F2" />
+<link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+<link rel="icon" href="./icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="StudyPilot" />
+<meta name="mobile-web-app-capable" content="yes" />
+
+<style>
+  html, body { margin: 0; padding: 0; background: #FAF9F7; height: 100%; font-family: 'Inter', system-ui, sans-serif; }
+  #root { min-height: 100vh; }
+
+  #boot-splash {
+    position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+    background: #FAF9F7; gap: 14px; z-index: 9999;
+  }
+  #boot-splash.visible { display: flex; }
+  #boot-splash img { width: 56px; height: 56px; border-radius: 16px; }
+  #boot-splash .spinner { width: 22px; height: 22px; border-radius: 50%; border: 3px solid #E7E4DE; border-top-color: #5B57F2; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #boot-error { max-width: 420px; text-align: center; color: #E0455D; font-size: 13px; padding: 0 20px; display: none; }
+
+  /* Login-Screen */
+  #auth-screen {
+    position: fixed; inset: 0; z-index: 9998; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(160deg, #FAF9F7, #ECEBFE); padding: 24px;
+  }
+  #auth-card {
+    width: 100%; max-width: 360px; background: #fff; border-radius: 22px; padding: 28px 24px;
+    box-shadow: 0 20px 50px -15px rgba(30,25,15,0.25);
+  }
+  #auth-card .logo { width: 44px; height: 44px; border-radius: 14px; margin: 0 auto 14px; display: block; }
+  #auth-card h1 { text-align: center; font-size: 19px; font-weight: 700; margin: 0 0 4px; color: #211F1C; }
+  #auth-card p.sub { text-align: center; font-size: 13px; color: #78756E; margin: 0 0 20px; }
+  #auth-card input {
+    width: 100%; box-sizing: border-box; padding: 11px 13px; margin-bottom: 10px; border-radius: 11px;
+    border: 1px solid #E7E4DE; background: #F1EFEB; font-size: 14px; outline: none;
+  }
+  #auth-card input:focus { border-color: #5B57F2; background: #fff; }
+  #auth-card button.primary {
+    width: 100%; padding: 12px; border: none; border-radius: 999px; background: linear-gradient(135deg,#5B57F2,#7A76FF);
+    color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; margin-top: 4px;
+  }
+  #auth-card button.link {
+    width: 100%; background: none; border: none; color: #5B57F2; font-size: 12.5px; margin-top: 12px; cursor: pointer; padding: 4px;
+  }
+  #auth-message { font-size: 12.5px; text-align: center; margin-top: 10px; min-height: 16px; }
+  #auth-message.error { color: #E0455D; }
+  #auth-message.ok { color: #0EA394; }
+
+  #logout-fab {
+    position: fixed; top: 10px; right: 10px; z-index: 9997; background: #fff; border: 1px solid #E7E4DE;
+    border-radius: 999px; padding: 6px 12px; font-size: 11px; color: #78756E; cursor: pointer; display: none;
+  }
+</style>
+
+<!-- Import Map: React, ReactDOM, lucide-react, recharts UND Supabase-JS direkt als
+     ES-Module von esm.sh, ganz ohne eigenen Build-Schritt. -->
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react/": "https://esm.sh/react@18.3.1/",
+    "react-dom": "https://esm.sh/react-dom@18.3.1",
+    "react-dom/": "https://esm.sh/react-dom@18.3.1/",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react",
+    "recharts": "https://esm.sh/recharts@2.12.7?external=react,react-dom",
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2"
+  }
+}
+</script>
+
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+
+<!-- ============================================================= -->
+<!-- LOGIN / REGISTRIERUNG                                          -->
+<!-- ============================================================= -->
+<div id="auth-screen">
+  <div id="auth-card">
+    <img class="logo" src="./icon-192.png" alt="StudyPilot" />
+    <h1>StudyPilot</h1>
+    <p class="sub" id="auth-sub">Melde dich an, um auf deine Daten zuzugreifen</p>
+    <input id="auth-email" type="email" placeholder="E-Mail" autocomplete="email" />
+    <input id="auth-password" type="password" placeholder="Passwort" autocomplete="current-password" />
+    <button class="primary" id="auth-submit">Anmelden</button>
+    <button class="link" id="auth-toggle">Noch keinen Account? Jetzt registrieren</button>
+    <button class="link" id="auth-forgot">Passwort vergessen?</button>
+    <div id="auth-message"></div>
+  </div>
+</div>
+
+<div id="boot-splash">
+  <img src="./icon-192.png" alt="StudyPilot" />
+  <div class="spinner"></div>
+  <div id="boot-error"></div>
+</div>
+<button id="logout-fab">Abmelden</button>
+<div id="root"></div>
+
+<script type="module">
+  import { createClient } from "@supabase/supabase-js";
+
+  // =================================================================
+  // KONFIGURATION – hier deine eigenen Supabase-Projektdaten eintragen
+  // (Supabase Dashboard → Project Settings → API)
+  // =================================================================
+  const SUPABASE_URL = https://plxpvktnyptulghpikyx.supabase.co
+  "DEINE_SUPABASE_PROJECT_URL";
+  const SUPABASE_ANON_KEY = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBseHB2a3RueXB0dWxnaHBpa3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc0MDEyNzksImV4cCI6MjEwMjk3NzI3OX0.RqR96xYr7gAT4jkjH3_mGmFJM0gewv4qP4qotavIE5g"DEIN_SUPABASE_ANON_KEY";
+
+  window.STUDYPILOT_STANDALONE = true;
+
+  const configMissing = SUPABASE_URL.startsWith("DEINE_") || SUPABASE_ANON_KEY.startsWith("DEIN_");
+  const authSub = document.getElementById("auth-sub");
+  const authMessage = document.getElementById("auth-message");
+
+  if (configMissing) {
+    authSub.textContent = "Konfiguration fehlt";
+    authMessage.className = "error";
+    authMessage.textContent = "SUPABASE_URL / SUPABASE_ANON_KEY sind in index.html noch nicht eingetragen. Siehe README.md.";
+    document.getElementById("auth-submit").disabled = true;
+    document.getElementById("auth-toggle").disabled = true;
+  }
+
+  const supabase = configMissing ? null : createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  // ---------------------------------------------------------------
+  // window.storage-Shim: bildet exakt die Claude-Artifact-Storage-API
+  // (get/set/delete/list) nach, aber persistiert echt in einer
+  // Supabase-Postgres-Tabelle, isoliert pro Nutzer via Row Level Security.
+  // app.jsx bleibt dadurch komplett unverändert.
+  // ---------------------------------------------------------------
+  function makeSupabaseStorage(userId) {
+    async function get(key) {
+      const { data, error } = await supabase.from("storage_kv").select("value").eq("user_id", userId).eq("key", key).maybeSingle();
+      if (error) throw error;
+      if (!data) throw new Error("Key not found: " + key);
+      return { key, value: data.value, shared: false };
+    }
+    async function set(key, value) {
+      const { error } = await supabase.from("storage_kv").upsert(
+        { user_id: userId, key, value, updated_at: new Date().toISOString() },
+        { onConflict: "user_id,key" }
+      );
+      if (error) throw error;
+      return { key, value, shared: false };
+    }
+    async function del(key) {
+      const { error } = await supabase.from("storage_kv").delete().eq("user_id", userId).eq("key", key);
+      if (error) throw error;
+      return { key, deleted: true, shared: false };
+    }
+    async function list(prefix) {
+      let query = supabase.from("storage_kv").select("key").eq("user_id", userId);
+      if (prefix) query = query.like("key", prefix + "%");
+      const { data, error } = await query;
+      if (error) throw error;
+      return { keys: (data || []).map((r) => r.key), prefix, shared: false };
+    }
+    return { get, set, delete: del, list };
+  }
+
+  function showBootError(detail) {
+    const root = document.getElementById("root");
+    const el = document.getElementById("boot-error");
+    if (el && root && !root.hasChildNodes()) {
+      el.style.display = "block";
+      el.innerHTML =
+        '<div style="margin-bottom:10px;">Fehler beim Laden:</div>' +
+        '<pre style="text-align:left;background:#FBE7EA;padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-word;font-size:11px;">' +
+        String(detail).replace(/</g, "&lt;") +
+        "</pre>" +
+        '<button id="boot-signout-btn" style="margin-top:12px;padding:8px 16px;border-radius:999px;border:none;background:#E0455D;color:#fff;font-size:12px;">Abmelden &amp; neu versuchen</button>';
+      const btn = document.getElementById("boot-signout-btn");
+      if (btn) btn.onclick = async () => { await supabase.auth.signOut(); window.location.reload(); };
+    }
+  }
+  window.addEventListener("error", (e) => showBootError(e.message || (e.error && (e.error.stack || e.error.message)) || "unbekannter Fehler"));
+  window.addEventListener("unhandledrejection", (e) => showBootError((e.reason && (e.reason.stack || e.reason.message)) || String(e.reason) || "unbekannter Fehler (Promise)"));
+
+  async function mountApp() {
+    const rootEl = document.getElementById("root");
+    const splashObserver = new MutationObserver(() => {
+      if (rootEl.hasChildNodes()) {
+        document.getElementById("boot-splash").classList.remove("visible");
+        splashObserver.disconnect();
+      }
+    });
+    splashObserver.observe(rootEl, { childList: true, subtree: true });
+
+    const scriptEl = document.createElement("script");
+    scriptEl.type = "text/babel";
+    scriptEl.setAttribute("data-type", "module");
+    scriptEl.setAttribute("data-presets", "react");
+    scriptEl.src = "./app.jsx";
+    document.head.appendChild(scriptEl);
+    window.Babel.transformScriptTags();
+  }
+
+  async function onAuthenticated(user) {
+    window.storage = makeSupabaseStorage(user.id);
+    document.getElementById("auth-screen").remove();
+    document.getElementById("boot-splash").classList.add("visible");
+    const fab = document.getElementById("logout-fab");
+    fab.style.display = "block";
+    fab.onclick = async () => { await supabase.auth.signOut(); window.location.reload(); };
+    mountApp();
+  }
+
+  // --- Auth-Formular-Logik ---
+  let mode = "signin"; // signin | signup
+  const emailEl = document.getElementById("auth-email");
+  const passEl = document.getElementById("auth-password");
+  const submitBtn = document.getElementById("auth-submit");
+  const toggleBtn = document.getElementById("auth-toggle");
+  const forgotBtn = document.getElementById("auth-forgot");
+
+  function setMessage(text, type) {
+    authMessage.textContent = text || "";
+    authMessage.className = type || "";
+  }
+
+  toggleBtn.addEventListener("click", () => {
+    mode = mode === "signin" ? "signup" : "signin";
+    submitBtn.textContent = mode === "signin" ? "Anmelden" : "Registrieren";
+    toggleBtn.textContent = mode === "signin" ? "Noch keinen Account? Jetzt registrieren" : "Schon registriert? Jetzt anmelden";
+    authSub.textContent = mode === "signin" ? "Melde dich an, um auf deine Daten zuzugreifen" : "Erstelle einen kostenlosen Account";
+    setMessage("");
+  });
+
+  forgotBtn.addEventListener("click", async () => {
+    if (!emailEl.value) { setMessage("Trage zuerst deine E-Mail-Adresse ein.", "error"); return; }
+    const { error } = await supabase.auth.resetPasswordForEmail(emailEl.value);
+    setMessage(error ? error.message : "E-Mail zum Zurücksetzen wurde verschickt (falls der Account existiert).", error ? "error" : "ok");
+  });
+
+  submitBtn.addEventListener("click", async () => {
+    if (configMissing) return;
+    const email = emailEl.value.trim();
+    const password = passEl.value;
+    if (!email || !password) { setMessage("Bitte E-Mail und Passwort ausfüllen.", "error"); return; }
+    submitBtn.disabled = true;
+    setMessage("");
+    try {
+      if (mode === "signin") {
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        if (data.session) await onAuthenticated(data.user);
+      } else {
+        const { data, error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        if (data.session) {
+          await onAuthenticated(data.user);
+        } else {
+          setMessage("Fast fertig! Bestätige den Link in deiner E-Mail, dann kannst du dich anmelden.", "ok");
+        }
+      }
+    } catch (err) {
+      setMessage(err.message || "Etwas ist schiefgelaufen.", "error");
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
+  passEl.addEventListener("keydown", (e) => { if (e.key === "Enter") submitBtn.click(); });
+
+  // Bereits eingeloggt? (Session wird von supabase-js im Browser gemerkt)
+  if (!configMissing) {
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) onAuthenticated(data.session.user);
+    });
+  }
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => { navigator.serviceWorker.register("./sw.js").catch(() => {}); });
+  }
+</script>
+
+</body>
+</html>
