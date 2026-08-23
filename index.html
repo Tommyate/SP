@@ -62,6 +62,46 @@
     position: fixed; top: 10px; right: 10px; z-index: 9997; background: #fff; border: 1px solid #E7E4DE;
     border-radius: 999px; padding: 6px 12px; font-size: 11px; color: #78756E; cursor: pointer; display: none;
   }
+  #admin-fab {
+    position: fixed; top: 10px; right: 92px; z-index: 9997; background: #5B57F2; border: none; color: #fff;
+    border-radius: 999px; padding: 6px 12px; font-size: 11px; cursor: pointer; display: none;
+  }
+
+  /* Zugriff-ausstehend-Screen (eingeloggt, aber noch kein gültiger Einladungscode eingelöst) */
+  #pending-screen {
+    position: fixed; inset: 0; z-index: 9998; display: none; align-items: center; justify-content: center;
+    background: linear-gradient(160deg, #FAF9F7, #ECEBFE); padding: 24px;
+  }
+  #pending-screen.visible { display: flex; }
+  #pending-card { width: 100%; max-width: 360px; background: #fff; border-radius: 22px; padding: 28px 24px; box-shadow: 0 20px 50px -15px rgba(30,25,15,0.25); text-align: center; }
+  #pending-card h1 { font-size: 18px; font-weight: 700; margin: 0 0 8px; color: #211F1C; }
+  #pending-card p { font-size: 13px; color: #78756E; margin: 0 0 16px; line-height: 1.5; }
+  #pending-card input {
+    width: 100%; box-sizing: border-box; padding: 11px 13px; margin-bottom: 10px; border-radius: 11px;
+    border: 1px solid #E7E4DE; background: #F1EFEB; font-size: 14px; outline: none; text-align: center; letter-spacing: 1px;
+  }
+  #pending-signout { background: none; border: none; color: #9C9AA4; font-size: 12px; margin-top: 14px; cursor: pointer; }
+
+  /* Admin-Panel */
+  #admin-overlay {
+    position: fixed; inset: 0; z-index: 10000; display: none; align-items: center; justify-content: center;
+    background: rgba(20,18,14,0.45); padding: 20px;
+  }
+  #admin-overlay.visible { display: flex; }
+  #admin-panel { width: 100%; max-width: 460px; max-height: 80vh; overflow-y: auto; background: #fff; border-radius: 20px; padding: 24px; }
+  #admin-panel h2 { font-size: 17px; font-weight: 700; margin: 0 0 4px; color: #211F1C; }
+  #admin-panel p.sub { font-size: 12.5px; color: #78756E; margin: 0 0 16px; }
+  #admin-new-row { display: flex; gap: 8px; margin-bottom: 16px; }
+  #admin-new-code { flex: 1; padding: 9px 12px; border-radius: 10px; border: 1px solid #E7E4DE; background: #F1EFEB; font-size: 13px; }
+  #admin-generate-btn, #admin-close-btn { padding: 9px 14px; border-radius: 999px; border: none; font-size: 12.5px; cursor: pointer; }
+  #admin-generate-btn { background: linear-gradient(135deg,#5B57F2,#7A76FF); color: #fff; font-weight: 600; }
+  #admin-close-btn { background: #F1EFEB; color: #211F1C; width: 100%; margin-top: 14px; }
+  #admin-list { display: flex; flex-direction: column; gap: 6px; }
+  .admin-code-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; background: #F1EFEB; border-radius: 10px; font-size: 12.5px; }
+  .admin-code-row .code { font-family: monospace; font-weight: 700; }
+  .admin-code-row .status-free { color: #0EA394; }
+  .admin-code-row .status-used { color: #9C9AA4; }
+  .admin-code-row button { background: none; border: none; color: #E0455D; cursor: pointer; font-size: 12px; }
 </style>
 
 <!-- Import Map: React, ReactDOM, lucide-react, recharts UND Supabase-JS direkt als
@@ -96,10 +136,35 @@
     <p class="sub" id="auth-sub">Melde dich an, um auf deine Daten zuzugreifen</p>
     <input id="auth-email" type="email" placeholder="E-Mail" autocomplete="email" />
     <input id="auth-password" type="password" placeholder="Passwort" autocomplete="current-password" />
+    <input id="auth-invite" type="text" placeholder="Einladungscode" autocomplete="off" style="display:none;" />
     <button class="primary" id="auth-submit">Anmelden</button>
     <button class="link" id="auth-toggle">Noch keinen Account? Jetzt registrieren</button>
     <button class="link" id="auth-forgot">Passwort vergessen?</button>
     <div id="auth-message"></div>
+  </div>
+</div>
+
+<div id="pending-screen">
+  <div id="pending-card">
+    <h1>Fast geschafft</h1>
+    <p id="pending-text">Dein Account ist noch nicht freigeschaltet. Falls du einen Einladungscode hast, gib ihn hier ein:</p>
+    <input id="pending-code-input" type="text" placeholder="Einladungscode" autocomplete="off" />
+    <button class="primary" id="pending-submit">Freischalten</button>
+    <div id="pending-message" style="font-size:12.5px;margin-top:10px;min-height:16px;"></div>
+    <button id="pending-signout">Abmelden</button>
+  </div>
+</div>
+
+<div id="admin-overlay">
+  <div id="admin-panel">
+    <h2>Einladungscodes verwalten</h2>
+    <p class="sub">Nur für admin@admin.op sichtbar.</p>
+    <div id="admin-new-row">
+      <input id="admin-new-code" type="text" placeholder="Neuer Code (frei wählbar)" />
+      <button id="admin-generate-btn">+ Erstellen</button>
+    </div>
+    <div id="admin-list"></div>
+    <button id="admin-close-btn">Schließen</button>
   </div>
 </div>
 
@@ -108,6 +173,7 @@
   <div class="spinner"></div>
   <div id="boot-error"></div>
 </div>
+<button id="admin-fab">Admin</button>
 <button id="logout-fab">Abmelden</button>
 <div id="root"></div>
 
@@ -210,13 +276,100 @@
     window.Babel.transformScriptTags();
   }
 
+  function showPending(message) {
+    document.getElementById("auth-screen").remove();
+    document.getElementById("pending-screen").classList.add("visible");
+    if (message) document.getElementById("pending-text").textContent = message;
+  }
+
+  async function checkAccess(user) {
+    const { data: profile, error } = await supabase.from("profiles").select("is_allowed, is_admin").eq("user_id", user.id).maybeSingle();
+    if (error) throw error;
+    return profile || { is_allowed: false, is_admin: false };
+  }
+
+  function setupAdminPanel(user) {
+    const overlay = document.getElementById("admin-overlay");
+    const listEl = document.getElementById("admin-list");
+    const newCodeEl = document.getElementById("admin-new-code");
+
+    async function refreshList() {
+      const { data, error } = await supabase.rpc("admin_list_invite_codes");
+      if (error) { listEl.innerHTML = '<p style="color:#E0455D;font-size:12px;">' + error.message + "</p>"; return; }
+      if (!data || data.length === 0) { listEl.innerHTML = '<p style="color:#9C9AA4;font-size:12px;text-align:center;">Noch keine Codes erstellt.</p>'; return; }
+      listEl.innerHTML = data.map((row) => {
+        const used = !!row.redeemed_by_email;
+        return (
+          '<div class="admin-code-row">' +
+            '<span class="code">' + row.code + "</span>" +
+            '<span class="' + (used ? "status-used" : "status-free") + '">' + (used ? "eingelöst von " + row.redeemed_by_email : "frei") + "</span>" +
+            (used ? "" : '<button data-code="' + row.code + '">Löschen</button>') +
+          "</div>"
+        );
+      }).join("");
+      listEl.querySelectorAll("button[data-code]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          await supabase.rpc("admin_delete_invite_code", { code_input: btn.getAttribute("data-code") });
+          refreshList();
+        });
+      });
+    }
+
+    document.getElementById("admin-generate-btn").addEventListener("click", async () => {
+      let code = newCodeEl.value.trim();
+      if (!code) code = Math.random().toString(36).slice(2, 8).toUpperCase();
+      const { error } = await supabase.rpc("admin_create_invite_code", { code_input: code });
+      if (!error) { newCodeEl.value = ""; refreshList(); }
+    });
+    document.getElementById("admin-close-btn").addEventListener("click", () => overlay.classList.remove("visible"));
+
+    const fab = document.getElementById("admin-fab");
+    fab.style.display = "block";
+    fab.onclick = () => { overlay.classList.add("visible"); refreshList(); };
+  }
+
   async function onAuthenticated(user) {
     window.storage = makeSupabaseStorage(user.id);
-    document.getElementById("auth-screen").remove();
+
+    // Falls bei der Registrierung eine E-Mail-Bestätigung nötig war, wird der damals
+    // eingegebene Einladungscode jetzt (beim ersten echten Login danach) automatisch eingelöst.
+    const pendingCode = window.localStorage.getItem("sp_pending_invite_code");
+    if (pendingCode) {
+      try { await supabase.rpc("redeem_invite_code", { code_input: pendingCode }); } catch (e) { /* ignorieren, unten wird ohnehin geprüft */ }
+      window.localStorage.removeItem("sp_pending_invite_code");
+    }
+
+    let profile;
+    try {
+      profile = await checkAccess(user);
+    } catch (e) {
+      showBootError("Zugriffsprüfung fehlgeschlagen: " + (e.message || e));
+      return;
+    }
+
+    if (!profile.is_allowed) {
+      showPending();
+      const pendingSubmit = document.getElementById("pending-submit");
+      const pendingMsg = document.getElementById("pending-message");
+      pendingSubmit.onclick = async () => {
+        const code = document.getElementById("pending-code-input").value.trim();
+        if (!code) { pendingMsg.textContent = "Bitte Code eingeben."; pendingMsg.style.color = "#E0455D"; return; }
+        const { data: ok, error } = await supabase.rpc("redeem_invite_code", { code_input: code });
+        if (error) { pendingMsg.textContent = error.message; pendingMsg.style.color = "#E0455D"; return; }
+        if (!ok) { pendingMsg.textContent = "Ungültiger oder bereits verwendeter Code."; pendingMsg.style.color = "#E0455D"; return; }
+        window.location.reload();
+      };
+      document.getElementById("pending-signout").onclick = async () => { await supabase.auth.signOut(); window.location.reload(); };
+      return;
+    }
+
+    document.getElementById("auth-screen")?.remove();
+    document.getElementById("pending-screen")?.classList.remove("visible");
     document.getElementById("boot-splash").classList.add("visible");
     const fab = document.getElementById("logout-fab");
     fab.style.display = "block";
     fab.onclick = async () => { await supabase.auth.signOut(); window.location.reload(); };
+    if (profile.is_admin) setupAdminPanel(user);
     mountApp();
   }
 
@@ -224,6 +377,7 @@
   let mode = "signin"; // signin | signup
   const emailEl = document.getElementById("auth-email");
   const passEl = document.getElementById("auth-password");
+  const inviteEl = document.getElementById("auth-invite");
   const submitBtn = document.getElementById("auth-submit");
   const toggleBtn = document.getElementById("auth-toggle");
   const forgotBtn = document.getElementById("auth-forgot");
@@ -237,7 +391,8 @@
     mode = mode === "signin" ? "signup" : "signin";
     submitBtn.textContent = mode === "signin" ? "Anmelden" : "Registrieren";
     toggleBtn.textContent = mode === "signin" ? "Noch keinen Account? Jetzt registrieren" : "Schon registriert? Jetzt anmelden";
-    authSub.textContent = mode === "signin" ? "Melde dich an, um auf deine Daten zuzugreifen" : "Erstelle einen kostenlosen Account";
+    authSub.textContent = mode === "signin" ? "Melde dich an, um auf deine Daten zuzugreifen" : "Erstelle einen Account (Einladungscode nötig)";
+    inviteEl.style.display = mode === "signup" ? "block" : "none";
     setMessage("");
   });
 
@@ -252,6 +407,7 @@
     const email = emailEl.value.trim();
     const password = passEl.value;
     if (!email || !password) { setMessage("Bitte E-Mail und Passwort ausfüllen.", "error"); return; }
+    if (mode === "signup" && !inviteEl.value.trim()) { setMessage("Bitte Einladungscode eingeben.", "error"); return; }
     submitBtn.disabled = true;
     setMessage("");
     try {
@@ -260,12 +416,21 @@
         if (error) throw error;
         if (data.session) await onAuthenticated(data.user);
       } else {
+        const inviteCode = inviteEl.value.trim();
+        const { data: isValid, error: validateError } = await supabase.rpc("validate_invite_code", { code_input: inviteCode });
+        if (validateError) throw validateError;
+        if (!isValid) { setMessage("Dieser Einladungscode ist ungültig oder bereits verwendet.", "error"); submitBtn.disabled = false; return; }
+
         const { data, error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
         if (data.session) {
+          const { data: redeemed, error: redeemError } = await supabase.rpc("redeem_invite_code", { code_input: inviteCode });
+          if (redeemError) throw redeemError;
+          if (!redeemed) { setMessage("Account erstellt, aber der Code wurde inzwischen von jemand anderem eingelöst. Bitte einen neuen Code anfordern.", "error"); submitBtn.disabled = false; return; }
           await onAuthenticated(data.user);
         } else {
-          setMessage("Fast fertig! Bestätige den Link in deiner E-Mail, dann kannst du dich anmelden.", "ok");
+          setMessage("Fast fertig! Bestätige den Link in deiner E-Mail. Nach der Anmeldung wird dein Einladungscode automatisch eingelöst.", "ok");
+          window.localStorage.setItem("sp_pending_invite_code", inviteCode);
         }
       }
     } catch (err) {
