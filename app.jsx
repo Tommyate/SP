@@ -5,7 +5,8 @@ import {
   FileText, Flame, Clock, MapPin, User, GraduationCap, TrendingUp, AlertCircle, Layers,
   Zap, Menu, Calculator, Languages, Globe2, Landmark, Atom, Leaf, FlaskConical, Dumbbell,
   Palette, Music2, ImagePlus, Trash2, ArrowLeft, CheckCircle2, Circle, RotateCcw, Loader2,
-  BrainCircuit, ScanText, Wand2, Tags, School, Pencil, Download, UploadCloud, FileJson, Bot, Send
+  BrainCircuit, ScanText, Wand2, Tags, School, Pencil, Download, UploadCloud, FileJson, Bot, Send,
+  ChevronDown, ChevronUp
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid, RadialBarChart, RadialBar, PolarAngleAxis } from "recharts";
 
@@ -16,115 +17,131 @@ const THEME_CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
 
 .sp-root{
-  --radius-lg: 22px;
+  --radius-lg: 24px;
   --radius-md: 16px;
-  --radius-sm: 11px;
+  --radius-sm: 12px;
   font-family: 'Inter', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
 }
 .sp-root[data-theme="light"]{
-  --bg: #FAF9F7;
+  --bg: #F7F6F3;
   --bg-elevated: #FFFFFF;
-  --bg-soft: #F1EFEB;
-  --bg-hover: #EDEBE6;
-  --border: #E7E4DE;
-  --border-strong: #D9D5CD;
-  --text: #211F1C;
-  --text-muted: #78756E;
-  --text-faint: #A6A29A;
-  --accent: #5B57F2;
-  --accent-2: #7A76FF;
-  --accent-soft: #ECEBFE;
+  --bg-soft: #F0EEE9;
+  --bg-hover: #E9E6E0;
+  --border: rgba(33,31,28,0.07);
+  --border-strong: rgba(33,31,28,0.14);
+  --text: #1C1A17;
+  --text-muted: #726F68;
+  --text-faint: #A4A099;
+  --accent: #554FF0;
+  --accent-2: #8A6EF5;
+  --accent-soft: #EDEBFE;
   --accent-contrast: #FFFFFF;
-  --teal: #0EA394;
-  --teal-soft: #E1F5F2;
-  --amber: #DB8B15;
-  --amber-soft: #FBF0DD;
-  --rose: #E0455D;
-  --rose-soft: #FBE7EA;
-  --shadow-card: 0 1px 2px rgba(30,25,15,0.04), 0 8px 24px -12px rgba(30,25,15,0.10);
-  --shadow-pop: 0 12px 40px -8px rgba(30,25,15,0.22);
-  --glass-bg: rgba(255,255,255,0.66);
-  --glass-border: rgba(255,255,255,0.5);
+  --teal: #0C9C8D;
+  --teal-soft: #DFF5F1;
+  --amber: #CE7C0E;
+  --amber-soft: #FBF0DA;
+  --rose: #DB3E5C;
+  --rose-soft: #FCE7EB;
+  --shadow-card: 0 1px 1px rgba(28,22,10,0.03), 0 2px 6px rgba(28,22,10,0.04), 0 14px 32px -14px rgba(28,22,10,0.14);
+  --shadow-pop: 0 24px 60px -12px rgba(28,22,10,0.28);
+  --glass-bg: rgba(252,251,249,0.72);
+  --glass-border: rgba(33,31,28,0.06);
+  --ambient: radial-gradient(60% 50% at 12% -8%, rgba(138,110,245,0.14), transparent 60%),
+             radial-gradient(55% 45% at 100% 0%, rgba(12,156,141,0.10), transparent 60%),
+             radial-gradient(70% 60% at 50% 110%, rgba(85,79,240,0.07), transparent 60%);
 }
 .sp-root[data-theme="dark"]{
-  --bg: #131316;
-  --bg-elevated: #1C1C20;
-  --bg-soft: #202024;
-  --bg-hover: #26262B;
-  --border: #2C2C31;
-  --border-strong: #38383F;
-  --text: #F2F1EE;
-  --text-muted: #9C9AA4;
-  --text-faint: #6C6A73;
-  --accent: #8481FF;
-  --accent-2: #9B98FF;
-  --accent-soft: #26244A;
+  --bg: #100F13;
+  --bg-elevated: #1A1920;
+  --bg-soft: #1F1E26;
+  --bg-hover: #262530;
+  --border: rgba(255,255,255,0.07);
+  --border-strong: rgba(255,255,255,0.14);
+  --text: #F3F2F5;
+  --text-muted: #9E9CAA;
+  --text-faint: #6B697A;
+  --accent: #8D89FF;
+  --accent-2: #B2A2FF;
+  --accent-soft: #29273F;
   --accent-contrast: #FFFFFF;
-  --teal: #2DD4BF;
-  --teal-soft: #16302D;
+  --teal: #35DBC6;
+  --teal-soft: #16302E;
   --amber: #F0AC3D;
   --amber-soft: #332A17;
-  --rose: #F0687D;
-  --rose-soft: #37202A;
-  --shadow-card: 0 1px 2px rgba(0,0,0,0.2), 0 12px 28px -10px rgba(0,0,0,0.5);
-  --shadow-pop: 0 20px 50px -10px rgba(0,0,0,0.6);
-  --glass-bg: rgba(28,28,32,0.7);
-  --glass-border: rgba(255,255,255,0.08);
+  --rose: #FF7A93;
+  --rose-soft: #382330;
+  --shadow-card: 0 1px 1px rgba(0,0,0,0.3), 0 2px 8px rgba(0,0,0,0.3), 0 20px 44px -16px rgba(0,0,0,0.65);
+  --shadow-pop: 0 30px 70px -14px rgba(0,0,0,0.75);
+  --glass-bg: rgba(19,18,23,0.72);
+  --glass-border: rgba(255,255,255,0.06);
+  --ambient: radial-gradient(60% 50% at 12% -8%, rgba(141,137,255,0.16), transparent 60%),
+             radial-gradient(55% 45% at 100% 0%, rgba(53,219,198,0.10), transparent 60%),
+             radial-gradient(70% 60% at 50% 110%, rgba(141,137,255,0.08), transparent 60%);
 }
-.sp-root{ background: var(--bg); color: var(--text); }
-.sp-font-display{ font-family: 'Sora', 'Inter', system-ui, sans-serif; }
+.sp-root{
+  background: var(--ambient), var(--bg);
+  color: var(--text);
+}
+.sp-font-display{ font-family: 'Sora', 'Inter', system-ui, sans-serif; letter-spacing: -0.01em; }
+.sp-eyebrow{ text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; font-size: 11px; color: var(--text-faint); }
 .sp-card{
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-card);
-  transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease;
+  transition: transform .25s cubic-bezier(.22,1,.36,1), box-shadow .25s cubic-bezier(.22,1,.36,1), border-color .25s ease;
 }
-.sp-card-hover:hover{ transform: translateY(-2px); border-color: var(--border-strong); }
+.sp-card-hover:hover{ transform: translateY(-3px); box-shadow: var(--shadow-pop); border-color: var(--border-strong); }
+.sp-card-hover:active{ transform: translateY(-1px) scale(0.995); }
 .sp-glass{
   background: var(--glass-bg);
-  backdrop-filter: blur(18px) saturate(160%);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
   border-bottom: 1px solid var(--glass-border);
 }
 .sp-btn-primary{
+  position: relative;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: var(--accent-contrast);
   border-radius: 999px;
   font-weight: 600;
-  transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease;
-  box-shadow: 0 6px 20px -6px color-mix(in srgb, var(--accent) 60%, transparent);
+  overflow: hidden;
+  transition: transform .18s cubic-bezier(.22,1,.36,1), box-shadow .18s ease, opacity .18s ease;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.25) inset, 0 8px 22px -8px color-mix(in srgb, var(--accent) 65%, transparent);
 }
-.sp-btn-primary:hover{ transform: translateY(-1px) scale(1.015); opacity: .95; }
+.sp-btn-primary:hover{ transform: translateY(-1.5px) scale(1.015); box-shadow: 0 1px 0 rgba(255,255,255,0.3) inset, 0 12px 26px -8px color-mix(in srgb, var(--accent) 70%, transparent); }
 .sp-btn-primary:active{ transform: translateY(0px) scale(0.98); }
 .sp-btn-secondary{
-  background: var(--bg-soft);
+  background: var(--bg-elevated);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 999px;
   font-weight: 500;
-  transition: all .15s ease;
+  box-shadow: var(--shadow-card);
+  transition: all .18s cubic-bezier(.22,1,.36,1);
 }
-.sp-btn-secondary:hover{ background: var(--bg-hover); border-color: var(--border-strong); }
+.sp-btn-secondary:hover{ background: var(--bg-hover); border-color: var(--border-strong); transform: translateY(-1px); }
+.sp-btn-secondary:active{ transform: translateY(0); }
 .sp-input{
   background: var(--bg-soft);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   color: var(--text);
-  transition: border-color .15s ease, background .15s ease;
+  transition: border-color .18s ease, background .18s ease, box-shadow .18s ease;
 }
-.sp-input:focus{ outline: none; border-color: var(--accent); background: var(--bg-elevated); }
+.sp-input:focus{ outline: none; border-color: var(--accent); background: var(--bg-elevated); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent); }
 .sp-nav-item{
   border-radius: var(--radius-sm);
   color: var(--text-muted);
-  transition: all .15s ease;
+  transition: all .18s ease;
 }
 .sp-nav-item:hover{ background: var(--bg-soft); color: var(--text); }
 .sp-nav-item.active{ background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.sp-fade-in{ animation: spFadeIn .35s cubic-bezier(.22,1,.36,1) both; }
-@keyframes spFadeIn{ from{ opacity:0; transform: translateY(6px);} to{opacity:1; transform:none;} }
-.sp-pop-in{ animation: spPopIn .3s cubic-bezier(.22,1,.36,1) both; }
+.sp-fade-in{ animation: spFadeIn .4s cubic-bezier(.22,1,.36,1) both; }
+@keyframes spFadeIn{ from{ opacity:0; transform: translateY(8px);} to{opacity:1; transform:none;} }
+.sp-pop-in{ animation: spPopIn .32s cubic-bezier(.22,1,.36,1) both; }
 @keyframes spPopIn{ from{opacity:0; transform: scale(.96) translateY(8px);} to{opacity:1; transform:none;} }
 .sp-pulse-dot{ animation: spPulse 2s ease-in-out infinite; }
 @keyframes spPulse{ 0%,100%{ box-shadow: 0 0 0 0 currentColor22;} 50%{ box-shadow: 0 0 0 6px transparent;} }
@@ -143,6 +160,10 @@ const THEME_CSS = `
 .sp-flip-back{ transform: rotateY(180deg); }
 .sp-progress-track{ background: var(--bg-soft); border-radius: 999px; overflow:hidden; }
 .sp-progress-fill{ background: linear-gradient(90deg, var(--accent), var(--teal)); border-radius: 999px; transition: width .6s cubic-bezier(.22,1,.36,1); }
+.sp-navpill{
+  position: absolute; inset: 4px; border-radius: 999px; background: var(--accent-soft);
+  transition: transform .35s cubic-bezier(.22,1,.36,1), opacity .2s ease;
+}
 `;
 
 /* ------------------------------------------------------------------ */
@@ -181,7 +202,16 @@ const EXAM_TYPE_META = {
 
 const IS_STANDALONE = typeof window !== "undefined" && !!window.STUDYPILOT_STANDALONE;
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-const todayISO = () => new Date().toISOString().slice(0, 10);
+// WICHTIG: Datum immer aus den LOKALEN Datumsanteilen bauen, nie über toISOString(),
+// da das zu UTC konvertiert und nachts (00:00-02:00 Ortszeit, je nach Sommerzeit) den
+// falschen Tag (den Vortag) liefern würde.
+function toLocalISODate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+const todayISO = () => toLocalISODate(new Date());
 const fmtDate = (iso) => {
   if (!iso) return "—";
   const d = new Date(iso + "T00:00:00");
@@ -215,9 +245,6 @@ function computeTargetSchoolDay() {
   let cursor = addDays(new Date(), 1);
   let rolled = false;
   while (isoWeekday(cursor) > 5) { cursor = addDays(cursor, 1); rolled = true; }
-  if (isoWeekday(addDays(new Date(), 0)) >= isoWeekday(cursor) && cursor - new Date() > 86400000 * 0) {
-    // if the resulting day's weekday index is <= today's, we've rolled into next week
-  }
   const todayWd = isoWeekday(new Date());
   const targetWd = isoWeekday(cursor);
   if (targetWd <= todayWd) rolled = true;
@@ -228,7 +255,7 @@ function computeTargetSchoolDay() {
 function computeLearningPlan({ schedule, exams, subjects, currentWeekType }) {
   const { date, dayKey, rolled } = computeTargetSchoolDay();
   const targetWeekType = rolled ? (currentWeekType === "A" ? "B" : "A") : currentWeekType;
-  const targetISO = date.toISOString().slice(0, 10);
+  const targetISO = toLocalISODate(date);
 
   const lessonsTomorrow = schedule.filter(
     (l) => l.day === dayKey && (l.week === "ALL" || l.week === targetWeekType)
@@ -330,7 +357,7 @@ function computeStudyPlan(exam, relevantEntries) {
       const chunk = sorted.slice(i * chunkSize, (i + 1) * chunkSize);
       if (chunk.length === 0) continue;
       days.push({
-        date: addDays(today, dayOffset).toISOString().slice(0, 10),
+        date: toLocalISODate(addDays(today, dayOffset)),
         phase: "erarbeiten",
         entries: chunk,
         title: `Stoff durcharbeiten (${chunk.length} Eintrag${chunk.length > 1 ? "e" : ""})`,
@@ -341,7 +368,7 @@ function computeStudyPlan(exam, relevantEntries) {
 
   while (dayOffset < totalDays) {
     days.push({
-      date: addDays(today, dayOffset).toISOString().slice(0, 10),
+      date: toLocalISODate(addDays(today, dayOffset)),
       phase: "festigen",
       entries: sorted,
       title: "Zwischenwiederholung – gesamten Stoff überfliegen",
@@ -660,19 +687,37 @@ async function callClaudeScheduleImport(images, subjectNames) {
 async function callOpenRouterScheduleImport(apiKey, model, images, subjectNames) {
   const prompt = buildScheduleImportPrompt(subjectNames);
   const content = [{ type: "text", text: prompt }, ...images.map((img) => ({ type: "image_url", image_url: { url: img } }))];
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const doRequest = () => fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`, "HTTP-Referer": "https://claude.ai", "X-Title": "StudyPilot" },
     body: JSON.stringify({ model: model || "google/gemma-4-31b-it:free", messages: [{ role: "user", content }] }),
   });
-  if (!response.ok) {
-    const errText = await response.text().catch(() => "");
-    throw new Error(`OpenRouter-Anfrage fehlgeschlagen (${response.status}) ${errText.slice(0, 120)}`);
+
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let response;
+    try {
+      response = await doRequest();
+    } catch (networkErr) {
+      lastError = new Error("OpenRouter nicht erreichbar (Netzwerk-/CORS-Fehler). Prüfe deine Verbindung oder wechsle zu „Claude (integriert)“.");
+      await sleep(600 * (attempt + 1));
+      continue;
+    }
+    if (response.status === 429) {
+      lastError = new Error("OpenRouter-Ratenlimit erreicht (kostenlose Modelle sind begrenzt). Versuche es gleich noch einmal.");
+      await sleep(1200 * (attempt + 1));
+      continue;
+    }
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      throw new Error(`OpenRouter-Anfrage fehlgeschlagen (${response.status}) ${errText.slice(0, 120)}`);
+    }
+    const data = await response.json();
+    const text = data?.choices?.[0]?.message?.content;
+    if (!text) throw new Error("Keine Textantwort von OpenRouter erhalten");
+    return parseScheduleJson(text);
   }
-  const data = await response.json();
-  const text = data?.choices?.[0]?.message?.content;
-  if (!text) throw new Error("Keine Textantwort von OpenRouter erhalten");
-  return parseScheduleJson(text);
+  throw lastError || new Error("OpenRouter-Anfrage fehlgeschlagen");
 }
 
 async function runScheduleImport({ provider, openrouterApiKey, openrouterModel, images, subjectNames }) {
@@ -961,7 +1006,15 @@ function Dashboard({ data, subjects, onOpenSubject, onUpload, onGoPage }) {
       </div>
 
       {/* Hero */}
-      <div className="sp-card p-5 sm:p-6 mb-5 flex flex-col sm:flex-row items-center gap-6" style={{ borderColor: "var(--border)" }}>
+      <div
+        className="sp-card p-5 sm:p-6 mb-5 flex flex-col sm:flex-row items-center gap-6"
+        style={{
+          border: "1px solid transparent",
+          backgroundImage: "linear-gradient(var(--bg-elevated), var(--bg-elevated)), linear-gradient(135deg, color-mix(in srgb, var(--accent) 45%, transparent), color-mix(in srgb, var(--teal) 35%, transparent))",
+          backgroundOrigin: "border-box",
+          backgroundClip: "padding-box, border-box",
+        }}
+      >
         <LearnPulse items={plan.items} subjects={subjects} entries={data.entries} />
         <div className="flex-1 w-full">
           <div className="flex items-center gap-2 mb-1">
@@ -1182,9 +1235,9 @@ function ScheduleImportModal({ open, onClose, subjects, settings, onImport }) {
   useEffect(() => { if (open) { setStep("select"); setImages([]); setRows([]); setError(null); } }, [open]);
 
   const handleFiles = async (files) => {
-    const arr = Array.from(files).slice(0, 4);
+    const arr = Array.from(files);
     const previews = await Promise.all(arr.map((f) => downscaleImage(f, 1100, 0.75)));
-    setImages((prev) => [...prev, ...previews]);
+    setImages((prev) => [...prev, ...previews].slice(0, 4));
   };
 
   const analyze = async () => {
@@ -1300,7 +1353,7 @@ function SchedulePage({ data, setData, subjects }) {
       const findOrCreate = (name) => {
         const match = subjectsNext.find((s) => s.name.toLowerCase() === (name || "").toLowerCase());
         if (match) return match.id;
-        const created = { id: uid(), name: (name || "Unbekannt").trim(), color: SUBJECT_PALETTE[subjectsNext.length % SUBJECT_PALETTE.length] };
+        const created = { id: uid(), name: (name || "Unbekannt").trim(), color: SUBJECT_PALETTE[subjectsNext.length % SUBJECT_PALETTE.length], quizFrequency: "occasional" };
         subjectsNext = [...subjectsNext, created];
         return created.id;
       };
@@ -1418,9 +1471,9 @@ function UploadModal({ open, onClose, subjects, defaultSubjectId, settings, onSa
   }, [open]);
 
   const handleFiles = async (files) => {
-    const arr = Array.from(files).slice(0, 6);
+    const arr = Array.from(files);
     const previews = await Promise.all(arr.map((f) => downscaleImage(f)));
-    setImages((prev) => [...prev, ...previews]);
+    setImages((prev) => [...prev, ...previews].slice(0, 6));
   };
 
   const runStepAnimation = (onDone) => {
@@ -1769,7 +1822,7 @@ function LearnSession({ subjectId, entries, onUpdateTerm, onExit }) {
     const box = knewIt ? Math.min((current.srsBox || 1) + 1, SRS_INTERVALS.length) : 1;
     const interval = SRS_INTERVALS[box - 1];
     const due = new Date(); due.setDate(due.getDate() + interval);
-    onUpdateTerm(current.entryId, current.id, { srsBox: box, srsDue: due.toISOString().slice(0, 10) });
+    onUpdateTerm(current.entryId, current.id, { srsBox: box, srsDue: toLocalISODate(due) });
     setStats((s) => ({ correct: s.correct + (knewIt ? 1 : 0), again: s.again + (knewIt ? 0 : 1) }));
     setFlipped(false);
     if (index + 1 < queue.length) setIndex(index + 1);
@@ -2580,12 +2633,12 @@ function ExamsPage({ data, setData, subjects, onOpenSubject }) {
                 <div className="flex items-center gap-4 mt-2.5 flex-wrap">
                   <button onClick={() => setExpandedId(expanded ? null : e.id)} className="flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--accent)" }}>
                     <Layers size={12} /> {relevant.length === 0 ? "Kein passender Lernstoff gefunden" : `${relevant.length} relevante${relevant.length === 1 ? "r" : ""} Hefteintrag${relevant.length === 1 ? "" : "e"}`}
-                    {relevant.length > 0 && (expanded ? <ChevronLeft size={12} style={{ transform: "rotate(-90deg)" }} /> : <ChevronRight size={12} />)}
+                    {relevant.length > 0 && (expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
                   </button>
                   {!past && relevant.length > 0 && (
                     <button onClick={() => setPlanExpandedId(planExpanded ? null : e.id)} className="flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--teal)" }}>
                       <CalendarDays size={12} /> Lernplan
-                      {planExpanded ? <ChevronLeft size={12} style={{ transform: "rotate(-90deg)" }} /> : <ChevronRight size={12} />}
+                      {planExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                     </button>
                   )}
                 </div>
@@ -2925,7 +2978,17 @@ function BottomNav({ page, onNav }) {
         const active = page === key || (key === "subjects" && page === "subject");
         return (
           <button key={key} onClick={() => onNav(key)} className="flex-1 flex flex-col items-center justify-center gap-0.5 py-2.5">
-            <Icon size={20} style={{ color: active ? "var(--accent)" : "var(--text-faint)" }} />
+            <div
+              className="flex items-center justify-center transition-all"
+              style={{
+                width: 40, height: 26, borderRadius: 999,
+                background: active ? "var(--accent-soft)" : "transparent",
+                transform: active ? "scale(1)" : "scale(0.92)",
+                transitionDuration: "280ms", transitionTimingFunction: "cubic-bezier(.22,1,.36,1)",
+              }}
+            >
+              <Icon size={19} style={{ color: active ? "var(--accent)" : "var(--text-faint)" }} />
+            </div>
             <span className="text-[10px] font-medium" style={{ color: active ? "var(--accent)" : "var(--text-faint)" }}>{item.label}</span>
           </button>
         );
@@ -3347,7 +3410,7 @@ function StudyPilotAppInner() {
       <div className="sp-root min-h-screen flex items-center justify-center" data-theme="light">
         <style>{THEME_CSS}</style>
         <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "linear-gradient(135deg,#5B57F2,#7A76FF)" }}>
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "linear-gradient(135deg,#554FF0,#8A6EF5)" }}>
             <Sparkles size={20} color="#fff" />
           </div>
           <Loader2 size={18} className="animate-spin" style={{ color: "#9C9AA4" }} />
