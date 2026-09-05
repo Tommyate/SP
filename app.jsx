@@ -6,7 +6,7 @@ import {
   Zap, Menu, Calculator, Languages, Globe2, Landmark, Atom, Leaf, FlaskConical, Dumbbell,
   Palette, Music2, ImagePlus, Trash2, ArrowLeft, CheckCircle2, Circle, RotateCcw, Loader2,
   BrainCircuit, ScanText, Wand2, Tags, School, Pencil, Download, UploadCloud, FileJson, Bot, Send,
-  ChevronDown, ChevronUp
+  ChevronDown, ChevronUp, Play, ListChecks, FileCheck2, PenLine, Target, Award
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid, RadialBarChart, RadialBar, PolarAngleAxis } from "recharts";
 
@@ -395,6 +395,57 @@ function groupPlanDays(days) {
   return groups;
 }
 
+// Fasst alles zusammen, was heute konkret zu tun ist: Vorbereitung auf morgen (aus computeLearningPlan),
+// Lernplan-Aufgaben aus laufenden Prüfungsvorbereitungen, fällige Hausaufgaben und fällige SRS-Wiederholungen.
+function computeTodayTodos(data, subjects) {
+  const today = todayISO();
+  const todos = [];
+
+  const learningPlan = computeLearningPlan({ schedule: data.schedule, exams: data.exams, subjects, currentWeekType: data.settings.currentWeekType });
+  learningPlan.items.forEach((item) => {
+    todos.push({
+      id: `study-${item.subjectId}`, type: "study", subjectId: item.subjectId, subject: item.subject,
+      title: `${item.subject.name}: ${item.verb}`, subtitle: item.reason, level: item.level,
+    });
+  });
+
+  data.exams.filter((e) => daysUntil(e.date) >= 0).forEach((exam) => {
+    const relevant = relevantEntriesForExam(exam, data.entries);
+    const plan = computeStudyPlan(exam, relevant);
+    if (plan.tooLate) return;
+    const todayEntry = plan.days.find((d) => d.date === today);
+    if (todayEntry) {
+      const subj = subjects.find((s) => s.id === exam.subjectId);
+      todos.push({
+        id: `examplan-${exam.id}`, type: "examplan", subjectId: exam.subjectId, subject: subj, examId: exam.id,
+        title: `${subj?.name}: ${todayEntry.title}`, subtitle: `für ${exam.title}`, level: 2,
+      });
+    }
+  });
+
+  data.homework.filter((h) => !h.done && h.dueDate && h.dueDate <= today).forEach((h) => {
+    const subj = subjects.find((s) => s.id === h.subjectId);
+    todos.push({
+      id: `hw-${h.id}`, type: "homework", subjectId: h.subjectId, subject: subj, homeworkId: h.id,
+      title: h.description, subtitle: subj?.name || "", level: h.dueDate < today ? 3 : 1,
+    });
+  });
+
+  subjects.forEach((s) => {
+    const subjEntries = data.entries.filter((e) => e.subjectId === s.id);
+    const dueCount = subjEntries.flatMap((e) => e.terms || []).filter((t) => !t.srsDue || t.srsDue <= today).length;
+    if (dueCount > 0) {
+      todos.push({
+        id: `srs-${s.id}`, type: "srs", subjectId: s.id, subject: s,
+        title: `${s.name}: ${dueCount} Begriff${dueCount === 1 ? "" : "e"} wiederholen`, subtitle: "Lernmodus", level: 1,
+      });
+    }
+  });
+
+  todos.sort((a, b) => b.level - a.level);
+  return todos;
+}
+
 function downscaleImage(file, maxW = 900, quality = 0.72) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -638,6 +689,161 @@ async function runTutorChat({ provider, openrouterApiKey, openrouterModel, subje
     return callOpenRouterTutor(openrouterApiKey, openrouterModel, systemPrompt, history);
   }
   return callClaudeTutor(systemPrompt, history);
+}
+
+/* Prüfungssimulation: KI erstellt Fragen aus dem eigenen Stoff, korrigiert danach die Antworten --- */
+function buildExamGenerationPrompt(subjectName, examType, contextText) {
+  const countHint = examType === "Schulaufgabe" ? "6-8" : examType === "Ex" ? "4-5" : "3-4";
+  return `Du bist Lehrer für das Fach "${subjectName}" und erstellst eine ${examType}-Übungsprüfung NUR auf Basis des folgenden Stoffs aus dem eigenen Unterricht der Schülerin/des Schülers:
+
+---
+${contextText || "(kein Stoff hinterlegt)"}
+---
+
+Erstelle ${countHint} Prüfungsfragen, die den obigen Stoff wirklich abfragen (keine Fragen zu Themen, die dort nicht vorkommen). Mische wo sinnvoll Verständnisfragen, Definitionsfragen und (falls Formeln/Rechenwege vorkommen) Rechenaufgaben. Realistisches Prüfungsniveau für eine Schulklasse, nicht Universitätsniveau.
+
+Antworte AUSSCHLIESSLICH mit einem validen JSON-Array (keine Codeblöcke, kein Fließtext) in diesem Format:
+[{"id":"q1","question":"Fragetext","maxPoints":10}]
+
+Punkte insgesamt sollten sich sinnvoll auf ca. 20-30 Gesamtpunkte aufsummieren. Antworte nur mit dem JSON-Array.`;
+}
+
+function parseExamQuestions(raw) {
+  let text = (raw || "").trim();
+  text = text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "");
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
+  if (start === -1 || end === -1) throw new Error("Keine gültige JSON-Antwort erhalten");
+  const parsed = JSON.parse(text.slice(start, end + 1));
+  if (!Array.isArray(parsed)) throw new Error("Unerwartetes Antwortformat");
+  return parsed.filter((q) => q && q.question).map((q, i) => ({
+    id: q.id || `q${i + 1}`, question: String(q.question), maxPoints: Number(q.maxPoints) > 0 ? Number(q.maxPoints) : 10,
+  }));
+}
+
+async function callClaudeGenerateExam(contextEntries, subjectName, examType) {
+  const prompt = buildExamGenerationPrompt(subjectName, examType, buildTutorContext(contextEntries));
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1500, messages: [{ role: "user", content: prompt }] }),
+  });
+  if (!response.ok) throw new Error(`Claude-Anfrage fehlgeschlagen (${response.status})`);
+  const data = await response.json();
+  const textBlock = (data.content || []).find((b) => b.type === "text");
+  if (!textBlock) throw new Error("Keine Textantwort von Claude erhalten");
+  return parseExamQuestions(textBlock.text);
+}
+
+async function callOpenRouterGenerateExam(apiKey, model, contextEntries, subjectName, examType) {
+  const prompt = buildExamGenerationPrompt(subjectName, examType, buildTutorContext(contextEntries));
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`, "HTTP-Referer": "https://claude.ai", "X-Title": "StudyPilot" },
+    body: JSON.stringify({ model: model || "google/gemma-4-31b-it:free", messages: [{ role: "user", content: prompt }] }),
+  });
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`OpenRouter-Anfrage fehlgeschlagen (${response.status}) ${errText.slice(0, 120)}`);
+  }
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error("Keine Textantwort von OpenRouter erhalten");
+  return parseExamQuestions(text);
+}
+
+async function runGenerateExam({ provider, openrouterApiKey, openrouterModel, contextEntries, subjectName, examType }) {
+  if (provider === "openrouter") {
+    if (!openrouterApiKey) throw new Error("Kein OpenRouter-API-Key hinterlegt (Einstellungen → KI).");
+    return callOpenRouterGenerateExam(openrouterApiKey, openrouterModel, contextEntries, subjectName, examType);
+  }
+  return callClaudeGenerateExam(contextEntries, subjectName, examType);
+}
+
+function buildGradingPrompt(subjectName, contextText, items) {
+  const itemsText = items.map((it, i) => `${i + 1}. (max. ${it.maxPoints ?? 10} Punkte) Frage: ${it.question}\nAntwort der Schülerin/des Schülers: ${it.answer || "(keine Antwort gegeben)"}`).join("\n\n");
+  return `Du bist ein fairer, aber gründlicher Lehrer für "${subjectName}" und korrigierst gerade Antworten NUR auf Basis des folgenden Unterrichtsstoffs:
+
+---
+${contextText || "(kein Stoff hinterlegt)"}
+---
+
+Zu korrigierende Fragen und Antworten:
+
+${itemsText}
+
+Bewerte jede Antwort fair nach Inhalt (nicht nach Rechtschreibung), vergib Teilpunkte bei teilweise richtigen Antworten, sei konstruktiv im Feedback. Antworte AUSSCHLIESSLICH mit einem validen JSON-Objekt in diesem Format (gleiche Reihenfolge wie oben, "id" muss zur Frage passen falls vorhanden, sonst 1-basierter Index als String):
+
+{
+  "perItem": [{"id":"q1","score": 7,"maxScore": 10,"feedback":"kurzes, konkretes Feedback: was war richtig, was hat gefehlt"}],
+  "overallScore": 75,
+  "overallFeedback": "1-2 Sätze Gesamteinschätzung mit einem konkreten Tipp, was als nächstes geübt werden sollte"
+}
+
+"overallScore" ist der Prozentsatz (0-100) der erreichten von maximal möglichen Punkten. Antworte nur mit dem JSON-Objekt.`;
+}
+
+function parseGradingResult(raw, items) {
+  let text = (raw || "").trim();
+  text = text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("Keine gültige JSON-Antwort erhalten");
+  const parsed = JSON.parse(text.slice(start, end + 1));
+  const perItemRaw = Array.isArray(parsed.perItem) ? parsed.perItem : [];
+  const perItem = items.map((it, i) => {
+    const match = perItemRaw.find((p) => p.id === it.id) || perItemRaw[i] || {};
+    return {
+      id: it.id,
+      score: Number(match.score) >= 0 ? Number(match.score) : 0,
+      maxScore: Number(match.maxScore) > 0 ? Number(match.maxScore) : (it.maxPoints || 10),
+      feedback: typeof match.feedback === "string" ? match.feedback : "",
+    };
+  });
+  return {
+    perItem,
+    overallScore: Number(parsed.overallScore) >= 0 ? Math.round(Number(parsed.overallScore)) : Math.round((perItem.reduce((s, p) => s + p.score, 0) / Math.max(1, perItem.reduce((s, p) => s + p.maxScore, 0))) * 100),
+    overallFeedback: typeof parsed.overallFeedback === "string" ? parsed.overallFeedback : "",
+  };
+}
+
+async function callClaudeGradeAnswers(subjectName, contextEntries, items) {
+  const prompt = buildGradingPrompt(subjectName, buildTutorContext(contextEntries), items);
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1500, messages: [{ role: "user", content: prompt }] }),
+  });
+  if (!response.ok) throw new Error(`Claude-Anfrage fehlgeschlagen (${response.status})`);
+  const data = await response.json();
+  const textBlock = (data.content || []).find((b) => b.type === "text");
+  if (!textBlock) throw new Error("Keine Textantwort von Claude erhalten");
+  return parseGradingResult(textBlock.text, items);
+}
+
+async function callOpenRouterGradeAnswers(apiKey, model, subjectName, contextEntries, items) {
+  const prompt = buildGradingPrompt(subjectName, buildTutorContext(contextEntries), items);
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`, "HTTP-Referer": "https://claude.ai", "X-Title": "StudyPilot" },
+    body: JSON.stringify({ model: model || "google/gemma-4-31b-it:free", messages: [{ role: "user", content: prompt }] }),
+  });
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`OpenRouter-Anfrage fehlgeschlagen (${response.status}) ${errText.slice(0, 120)}`);
+  }
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error("Keine Textantwort von OpenRouter erhalten");
+  return parseGradingResult(text, items);
+}
+
+async function runGradeAnswers({ provider, openrouterApiKey, openrouterModel, subjectName, contextEntries, items }) {
+  if (provider === "openrouter") {
+    if (!openrouterApiKey) throw new Error("Kein OpenRouter-API-Key hinterlegt (Einstellungen → KI).");
+    return callOpenRouterGradeAnswers(openrouterApiKey, openrouterModel, subjectName, contextEntries, items);
+  }
+  return callClaudeGradeAnswers(subjectName, contextEntries, items);
 }
 
 /* Stundenplan aus Foto einlesen ------------------------------------- */
@@ -954,7 +1160,7 @@ function LearnPulse({ items, subjects, entries }) {
   );
 }
 
-function Dashboard({ data, subjects, onOpenSubject, onUpload, onGoPage }) {
+function Dashboard({ data, subjects, onOpenSubject, onOpenExam, onUpload, onGoPage }) {
   const plan = useMemo(() => computeLearningPlan({
     schedule: data.schedule, exams: data.exams, subjects, currentWeekType: data.settings.currentWeekType,
   }), [data.schedule, data.exams, subjects, data.settings.currentWeekType]);
@@ -1047,15 +1253,18 @@ function Dashboard({ data, subjects, onOpenSubject, onUpload, onGoPage }) {
 
       {todayPlanTasks.length > 0 && (
         <div className="sp-card p-5 mb-5" style={{ background: "var(--teal-soft)" }}>
-          <div className="flex items-center gap-2 mb-3">
-            <CalendarDays size={15} style={{ color: "var(--teal)" }} />
-            <p className="text-sm font-semibold" style={{ color: "var(--teal)" }}>Laut Lernplan heute</p>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <CalendarDays size={15} style={{ color: "var(--teal)" }} />
+              <p className="text-sm font-semibold" style={{ color: "var(--teal)" }}>Laut Lernplan heute</p>
+            </div>
+            <button onClick={() => onGoPage("todo")} className="text-xs font-medium flex items-center gap-0.5" style={{ color: "var(--teal)" }}>Alle To-Dos <ChevronRight size={13} /></button>
           </div>
           <div className="flex flex-wrap gap-2">
             {todayPlanTasks.map((t, i) => (
               <button
                 key={i}
-                onClick={() => onOpenSubject(t.exam.subjectId)}
+                onClick={() => onOpenExam(t.exam.id)}
                 className="sp-card sp-card-hover flex items-center gap-2.5 pl-2 pr-3.5 py-2 text-left"
                 style={{ borderRadius: 999 }}
               >
@@ -1083,7 +1292,7 @@ function Dashboard({ data, subjects, onOpenSubject, onUpload, onGoPage }) {
               {upcomingExams.map((e) => {
                 const subj = subjects.find((s) => s.id === e.subjectId);
                 return (
-                  <div key={e.id} className="flex items-center gap-3 py-2 px-1 rounded-xl sp-nav-item" style={{ cursor: "pointer" }} onClick={() => onOpenSubject(e.subjectId)}>
+                  <div key={e.id} className="flex items-center gap-3 py-2 px-1 rounded-xl sp-nav-item" style={{ cursor: "pointer" }} onClick={() => onOpenExam(e.id)}>
                     <Avatar subject={subj} size={32} />
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium truncate">{e.title || e.type}</p>
@@ -1709,6 +1918,9 @@ function SubjectsPage({ data, setData, subjects, onOpenSubject, onAddSubject }) 
   const deleteSubject = (id) => setData((d) => {
     const nextChats = { ...d.chats };
     delete nextChats[id];
+    const removedExamIds = new Set(d.exams.filter((e) => e.subjectId === id).map((e) => e.id));
+    const nextExamSims = { ...d.examSims };
+    removedExamIds.forEach((examId) => delete nextExamSims[examId]);
     return {
       ...d,
       subjects: d.subjects.filter((s) => s.id !== id),
@@ -1717,6 +1929,7 @@ function SubjectsPage({ data, setData, subjects, onOpenSubject, onAddSubject }) 
       homework: d.homework.filter((h) => h.subjectId !== id),
       entries: d.entries.filter((e) => e.subjectId !== id),
       chats: nextChats,
+      examSims: nextExamSims,
     };
   });
 
@@ -1944,6 +2157,97 @@ function MCQuiz({ allTerms, onExit }) {
         })}
       </div>
       {selected && <button onClick={next} className="sp-btn-primary w-full py-3 text-sm mt-4">{index + 1 < questions.length ? "Weiter" : "Ergebnis anzeigen"}</button>}
+    </div>
+  );
+}
+
+function FreitextQuiz({ allTerms, subject, settings, onExit }) {
+  const questions = useMemo(() => shuffleArr(allTerms.filter((t) => t.def)).slice(0, 5), [allTerms]);
+  const [answers, setAnswers] = useState({});
+  const [phase, setPhase] = useState("answering"); // answering | grading | result
+  const [error, setError] = useState(null);
+  const [grading, setGrading] = useState(null);
+
+  const submit = async () => {
+    setPhase("grading"); setError(null);
+    try {
+      const items = questions.map((q, i) => ({ id: `t${i}`, question: `Definiere/erkläre: ${q.term}`, maxPoints: 10, answer: answers[i] || "" }));
+      const syntheticContext = [{
+        date: todayISO(), summary: "", bullets: [], formulas: [], merkkasten: "",
+        terms: questions.map((q) => ({ term: q.term, def: q.def })),
+      }];
+      const result = await runGradeAnswers({
+        provider: settings.aiProvider, openrouterApiKey: settings.openrouterApiKey, openrouterModel: settings.openrouterModel,
+        subjectName: subject?.name || "", contextEntries: syntheticContext, items,
+      });
+      setGrading(result);
+      setPhase("result");
+    } catch (e) {
+      setError(e.message || "Korrektur fehlgeschlagen.");
+      setPhase("answering");
+    }
+  };
+
+  if (questions.length === 0) return <EmptyState icon={PenLine} title="Mindestens 1 Begriff nötig" subtitle="Lade Hefteinträge hoch, damit StudyPilot Freitext-Fragen erstellen kann." />;
+
+  if (phase === "result" && grading) {
+    const scoreColor = grading.overallScore >= 75 ? "var(--teal)" : grading.overallScore >= 45 ? "var(--amber)" : "var(--rose)";
+    return (
+      <div className="max-w-md mx-auto">
+        <div className="flex items-center gap-4 mb-4 sp-card p-4" style={{ background: `${scoreColor}14` }}>
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0" style={{ background: "var(--bg-elevated)" }}>
+            <Award size={24} style={{ color: scoreColor }} />
+          </div>
+          <div className="min-w-0">
+            <p className="sp-font-display font-bold text-xl" style={{ color: scoreColor }}>{grading.overallScore}%</p>
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>{grading.overallFeedback}</p>
+          </div>
+        </div>
+        <div className="space-y-3 mb-5">
+          {questions.map((q, i) => {
+            const pi = grading.perItem.find((p) => p.id === `t${i}`) || { score: 0, maxScore: 10, feedback: "" };
+            return (
+              <div key={i} className="sp-card p-4">
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="text-sm font-semibold">{q.term}</p>
+                  <Chip color={pi.score / pi.maxScore >= 0.75 ? "teal" : pi.score / pi.maxScore >= 0.45 ? "amber" : "rose"}>{pi.score}/{pi.maxScore}</Chip>
+                </div>
+                <p className="text-xs mb-1.5 italic" style={{ color: "var(--text-muted)" }}>Deine Antwort: {answers[i] || "(keine)"}</p>
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>{pi.feedback}</p>
+              </div>
+            );
+          })}
+        </div>
+        <button onClick={onExit} className="sp-btn-primary w-full py-3 text-sm">Zurück zum Quiz</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-md mx-auto">
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={onExit} className="text-sm flex items-center gap-1 sp-nav-item px-2 py-1 rounded-lg -ml-2" style={{ color: "var(--text-muted)" }}><ArrowLeft size={14} />Beenden</button>
+        <span className="text-xs" style={{ color: "var(--text-faint)" }}>{questions.length} Fragen</span>
+      </div>
+      <div className="space-y-4 mb-5">
+        {questions.map((q, i) => (
+          <div key={i} className="sp-card p-4" style={{ background: "var(--bg-soft)" }}>
+            <p className="text-sm font-medium mb-2">Definiere/erkläre: <strong>{q.term}</strong></p>
+            <textarea
+              className="sp-input w-full px-3 py-2.5 text-sm resize-none"
+              rows={2}
+              placeholder="Deine Antwort..."
+              value={answers[i] || ""}
+              onChange={(e) => setAnswers((a) => ({ ...a, [i]: e.target.value }))}
+            />
+          </div>
+        ))}
+      </div>
+      {error && <div className="sp-card p-3 mb-3 text-sm" style={{ background: "var(--rose-soft)", color: "var(--rose)" }}>{error}</div>}
+      <button onClick={submit} disabled={phase === "grading"} className="sp-btn-primary w-full py-3 text-sm flex items-center justify-center gap-2 disabled:opacity-50">
+        {phase === "grading" ? <Loader2 size={16} className="animate-spin" /> : <FileCheck2 size={16} />}
+        {phase === "grading" ? "Wird korrigiert..." : "Abgeben & korrigieren lassen"}
+      </button>
     </div>
   );
 }
@@ -2202,7 +2506,7 @@ function TutorChat({ subject, scopedEntries, scopeLabel, settings, messages, onS
 
 function SubjectDetail({ subject, data, setData, onBack, onUpload }) {
   const [tab, setTab] = useState("entries");
-  const [quizMode, setQuizMode] = useState("cards"); // cards | learn | mc
+  const [quizMode, setQuizMode] = useState("cards"); // cards | learn | mc | freitext
   const [editEntry, setEditEntry] = useState(null);
   const [scopeType, setScopeType] = useState("all"); // all | abfrage | ex | sa
   const [saMode, setSaMode] = useState("ab"); // ab | alles
@@ -2420,9 +2724,10 @@ function SubjectDetail({ subject, data, setData, onBack, onUpload }) {
               <>
                 <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                   <p className="text-sm" style={{ color: "var(--text-muted)" }}>Tippe auf eine Karte, um sie umzudrehen.</p>
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 flex-wrap">
                     <button onClick={() => setQuizMode("learn")} className="sp-btn-primary px-3.5 py-2 text-xs flex items-center gap-1.5"><Flame size={13} />Lernmodus{dueCount > 0 ? ` (${dueCount} fällig)` : ""}</button>
                     <button onClick={() => setQuizMode("mc")} className="sp-btn-secondary px-3.5 py-2 text-xs flex items-center gap-1.5"><BrainCircuit size={13} />Multiple Choice</button>
+                    <button onClick={() => setQuizMode("freitext")} className="sp-btn-secondary px-3.5 py-2 text-xs flex items-center gap-1.5"><PenLine size={13} />Freitext (KI-korrigiert)</button>
                   </div>
                 </div>
                 <div className="grid sm:grid-cols-3 gap-4">
@@ -2435,6 +2740,9 @@ function SubjectDetail({ subject, data, setData, onBack, onUpload }) {
             )}
             {quizMode === "mc" && (
               <MCQuiz allTerms={allTerms} onExit={() => setQuizMode("cards")} />
+            )}
+            {quizMode === "freitext" && (
+              <FreitextQuiz allTerms={allTerms} subject={subject} settings={data.settings} onExit={() => setQuizMode("cards")} />
             )}
           </div>
         )
@@ -2589,13 +2897,170 @@ function StudyPlanView({ exam, relevantEntries }) {
   );
 }
 
-function ExamsPage({ data, setData, subjects, onOpenSubject }) {
+function ScoreBar({ score, maxScore }) {
+  const pct = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+  const color = pct >= 75 ? "var(--teal)" : pct >= 45 ? "var(--amber)" : "var(--rose)";
+  return (
+    <div className="sp-progress-track h-1.5 w-full">
+      <div className="h-full" style={{ width: `${pct}%`, background: color, borderRadius: 999, transition: "width .6s cubic-bezier(.22,1,.36,1)" }} />
+    </div>
+  );
+}
+
+function ExamSimulation({ exam, subject, relevantEntries, settings, simState, onSaveSim }) {
+  const [phase, setPhase] = useState(simState ? (simState.grading ? "result" : "answering") : "idle");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [answers, setAnswers] = useState(simState?.answers || {});
+
+  useEffect(() => {
+    setPhase(simState ? (simState.grading ? "result" : "answering") : "idle");
+    setAnswers(simState?.answers || {});
+  }, [simState?.completedAt, exam.id]);
+
+  const generate = async () => {
+    setLoading(true); setError(null);
+    try {
+      const questions = await runGenerateExam({
+        provider: settings.aiProvider, openrouterApiKey: settings.openrouterApiKey, openrouterModel: settings.openrouterModel,
+        contextEntries: relevantEntries, subjectName: subject?.name || "", examType: exam.type,
+      });
+      const fresh = { questions, answers: {}, grading: null, completedAt: null };
+      onSaveSim(fresh);
+      setAnswers({});
+      setPhase("answering");
+    } catch (e) {
+      setError(e.message || "Prüfung konnte nicht erstellt werden.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submit = async () => {
+    setLoading(true); setError(null);
+    try {
+      const items = simState.questions.map((q) => ({ id: q.id, question: q.question, maxPoints: q.maxPoints, answer: answers[q.id] || "" }));
+      const grading = await runGradeAnswers({
+        provider: settings.aiProvider, openrouterApiKey: settings.openrouterApiKey, openrouterModel: settings.openrouterModel,
+        subjectName: subject?.name || "", contextEntries: relevantEntries, items,
+      });
+      onSaveSim({ ...simState, answers, grading, completedAt: Date.now() });
+      setPhase("result");
+    } catch (e) {
+      setError(e.message || "Korrektur fehlgeschlagen.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (relevantEntries.length === 0) {
+    return <p className="text-sm" style={{ color: "var(--text-faint)" }}>Sobald relevanter Lernstoff für diese Prüfung vorhanden ist, kann StudyPilot eine Übungsprüfung dafür erstellen.</p>;
+  }
+
+  if (phase === "idle") {
+    return (
+      <div>
+        <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
+          StudyPilot erstellt eine {exam.type}-Übungsprüfung aus genau dem Stoff oben ({relevantEntries.length} Hefteintrag{relevantEntries.length === 1 ? "" : "e"}), die du direkt hier beantwortest. Danach korrigiert die KI und gibt dir konkretes Feedback.
+        </p>
+        {error && <div className="sp-card p-3 mb-3 text-sm" style={{ background: "var(--rose-soft)", color: "var(--rose)" }}>{error}</div>}
+        <button onClick={generate} disabled={loading} className="sp-btn-primary px-4 py-3 text-sm flex items-center gap-2 disabled:opacity-50">
+          {loading ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+          {loading ? "Prüfung wird erstellt..." : "KI-Prüfung erstellen"}
+        </button>
+      </div>
+    );
+  }
+
+  if (phase === "answering" && simState) {
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>{simState.questions.length} Fragen · {simState.questions.reduce((s, q) => s + q.maxPoints, 0)} Punkte gesamt</p>
+          <button onClick={() => { onSaveSim(null); setPhase("idle"); }} className="text-xs" style={{ color: "var(--text-faint)" }}>Verwerfen</button>
+        </div>
+        <div className="space-y-4 mb-5">
+          {simState.questions.map((q, i) => (
+            <div key={q.id} className="sp-card p-4" style={{ background: "var(--bg-soft)" }}>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold" style={{ color: "var(--text-faint)" }}>FRAGE {i + 1}</p>
+                <Chip color="muted">{q.maxPoints} P.</Chip>
+              </div>
+              <p className="text-sm font-medium mb-3">{q.question}</p>
+              <textarea
+                className="sp-input w-full px-3 py-2.5 text-sm resize-none"
+                rows={3}
+                placeholder="Deine Antwort..."
+                value={answers[q.id] || ""}
+                onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
+              />
+            </div>
+          ))}
+        </div>
+        {error && <div className="sp-card p-3 mb-3 text-sm" style={{ background: "var(--rose-soft)", color: "var(--rose)" }}>{error}</div>}
+        <button onClick={submit} disabled={loading} className="sp-btn-primary w-full py-3 text-sm flex items-center justify-center gap-2 disabled:opacity-50">
+          {loading ? <Loader2 size={16} className="animate-spin" /> : <FileCheck2 size={16} />}
+          {loading ? "Wird korrigiert..." : "Abgeben & korrigieren lassen"}
+        </button>
+      </div>
+    );
+  }
+
+  if (phase === "result" && simState?.grading) {
+    const g = simState.grading;
+    const scoreColor = g.overallScore >= 75 ? "var(--teal)" : g.overallScore >= 45 ? "var(--amber)" : "var(--rose)";
+    return (
+      <div>
+        <div className="flex items-center gap-4 mb-4 sp-card p-4" style={{ background: `${scoreColor}14` }}>
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0" style={{ background: "var(--bg-elevated)" }}>
+            <Award size={28} style={{ color: scoreColor }} />
+          </div>
+          <div className="min-w-0">
+            <p className="sp-font-display font-bold text-2xl" style={{ color: scoreColor }}>{g.overallScore}%</p>
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>{g.overallFeedback}</p>
+          </div>
+        </div>
+        <div className="space-y-3 mb-5">
+          {simState.questions.map((q, i) => {
+            const pi = g.perItem.find((p) => p.id === q.id) || { score: 0, maxScore: q.maxPoints, feedback: "" };
+            return (
+              <div key={q.id} className="sp-card p-4">
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="text-xs font-semibold" style={{ color: "var(--text-faint)" }}>FRAGE {i + 1}</p>
+                  <Chip color={pi.score / pi.maxScore >= 0.75 ? "teal" : pi.score / pi.maxScore >= 0.45 ? "amber" : "rose"}>{pi.score}/{pi.maxScore} P.</Chip>
+                </div>
+                <p className="text-sm font-medium mb-1.5">{q.question}</p>
+                <p className="text-xs mb-2 italic" style={{ color: "var(--text-muted)" }}>Deine Antwort: {answers[q.id] || "(keine)"}</p>
+                <ScoreBar score={pi.score} maxScore={pi.maxScore} />
+                {pi.feedback && <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>{pi.feedback}</p>}
+              </div>
+            );
+          })}
+        </div>
+        {error && <div className="sp-card p-3 mb-3 text-sm" style={{ background: "var(--rose-soft)", color: "var(--rose)" }}>{error}</div>}
+        <button onClick={generate} disabled={loading} className="sp-btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2 disabled:opacity-50">
+          {loading ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+          Neue Übungsprüfung generieren
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function ExamsPage({ data, setData, subjects, onOpenExam }) {
   const [modalOpen, setModalOpen] = useState(false);
-  const [expandedId, setExpandedId] = useState(null);
-  const [planExpandedId, setPlanExpandedId] = useState(null);
   const list = [...data.exams].sort((a, b) => a.date.localeCompare(b.date));
   const addExam = (exam) => setData((d) => ({ ...d, exams: [...d.exams, exam] }));
-  const removeExam = (id) => setData((d) => ({ ...d, exams: d.exams.filter((e) => e.id !== id) }));
+  const removeExam = (id, e) => {
+    e.stopPropagation();
+    setData((d) => {
+      const nextExamSims = { ...d.examSims };
+      delete nextExamSims[id];
+      return { ...d, exams: d.exams.filter((x) => x.id !== id), examSims: nextExamSims };
+    });
+  };
 
   return (
     <div className="sp-fade-in max-w-4xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
@@ -2611,54 +3076,96 @@ function ExamsPage({ data, setData, subjects, onOpenSubject }) {
             const subj = subjects.find((s) => s.id === e.subjectId);
             const meta = EXAM_TYPE_META[e.type] || EXAM_TYPE_META.Abfrage;
             const past = daysUntil(e.date) < 0;
-            const relevant = relevantEntriesForExam(e, data.entries);
-            const expanded = expandedId === e.id;
-            const planExpanded = planExpandedId === e.id;
+            const hasSim = !!data.examSims?.[e.id];
             return (
-              <div key={e.id} className="sp-card p-4" style={{ opacity: past ? 0.5 : 1 }}>
-                <div className="flex items-center gap-4">
-                  <Avatar subject={subj} size={42} />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="font-semibold text-sm">{e.title}</p>
-                      <Chip color={meta.color}>{e.type}</Chip>
-                    </div>
-                    <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{subj?.name} · {fmtDateLong(e.date)}{e.description ? ` · ${e.description}` : ""}</p>
+              <button
+                key={e.id}
+                onClick={() => onOpenExam(e.id)}
+                className="sp-card sp-card-hover w-full text-left p-4 flex items-center gap-4"
+                style={{ opacity: past ? 0.5 : 1 }}
+              >
+                <Avatar subject={subj} size={42} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-semibold text-sm">{e.title}</p>
+                    <Chip color={meta.color}>{e.type}</Chip>
+                    {hasSim && <Chip color="teal"><FileCheck2 size={11} />Übung erstellt</Chip>}
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <Chip color={daysUntil(e.date) <= 1 && !past ? "rose" : "muted"}>{untilLabel(e.date)}</Chip>
-                    <button onClick={() => removeExam(e.id)} className="p-1.5 rounded-full sp-nav-item"><Trash2 size={14} style={{ color: "var(--text-faint)" }} /></button>
-                  </div>
+                  <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{subj?.name} · {fmtDateLong(e.date)}{e.description ? ` · ${e.description}` : ""}</p>
                 </div>
-                <div className="flex items-center gap-4 mt-2.5 flex-wrap">
-                  <button onClick={() => setExpandedId(expanded ? null : e.id)} className="flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--accent)" }}>
-                    <Layers size={12} /> {relevant.length === 0 ? "Kein passender Lernstoff gefunden" : `${relevant.length} relevante${relevant.length === 1 ? "r" : ""} Hefteintrag${relevant.length === 1 ? "" : "e"}`}
-                    {relevant.length > 0 && (expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />)}
-                  </button>
-                  {!past && relevant.length > 0 && (
-                    <button onClick={() => setPlanExpandedId(planExpanded ? null : e.id)} className="flex items-center gap-1.5 text-xs font-medium" style={{ color: "var(--teal)" }}>
-                      <CalendarDays size={12} /> Lernplan
-                      {planExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                    </button>
-                  )}
+                <div className="flex items-center gap-2 shrink-0">
+                  <Chip color={daysUntil(e.date) <= 1 && !past ? "rose" : "muted"}>{untilLabel(e.date)}</Chip>
+                  <button onClick={(ev) => removeExam(e.id, ev)} className="p-1.5 rounded-full sp-nav-item"><Trash2 size={14} style={{ color: "var(--text-faint)" }} /></button>
+                  <ChevronRight size={16} style={{ color: "var(--text-faint)" }} />
                 </div>
-                {expanded && relevant.length > 0 && (
-                  <div className="mt-2.5 space-y-1.5 sp-fade-in">
-                    {relevant.map((r) => (
-                      <button key={r.id} onClick={() => onOpenSubject && onOpenSubject(r.subjectId)} className="w-full text-left flex items-center gap-2.5 p-2 rounded-xl sp-nav-item" style={{ background: "var(--bg-soft)" }}>
-                        <span className="text-xs shrink-0" style={{ color: "var(--text-faint)" }}>{fmtDate(r.date)}</span>
-                        <span className="text-xs truncate" style={{ color: "var(--text-muted)" }}>{r.summary}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {planExpanded && <StudyPlanView exam={e} relevantEntries={relevant} />}
-              </div>
+              </button>
             );
           })}
         </div>
       )}
       <ExamModal open={modalOpen} onClose={() => setModalOpen(false)} onSave={addExam} subjects={subjects} />
+    </div>
+  );
+}
+
+function ExamDetail({ exam, subjects, data, setData, onBack, onOpenSubject }) {
+  const subject = subjects.find((s) => s.id === exam.subjectId);
+  const meta = EXAM_TYPE_META[exam.type] || EXAM_TYPE_META.Abfrage;
+  const relevant = useMemo(() => relevantEntriesForExam(exam, data.entries), [exam, data.entries]);
+  const past = daysUntil(exam.date) < 0;
+  const simState = data.examSims?.[exam.id] || null;
+
+  const saveSim = (sim) => setData((d) => {
+    const next = { ...d.examSims };
+    if (sim === null) delete next[exam.id]; else next[exam.id] = sim;
+    return { ...d, examSims: next };
+  });
+
+  return (
+    <div className="sp-fade-in max-w-3xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
+      <button onClick={onBack} className="flex items-center gap-1.5 text-sm mb-4 sp-nav-item px-2 py-1 rounded-lg -ml-2" style={{ color: "var(--text-muted)" }}>
+        <ArrowLeft size={15} /> Zurück
+      </button>
+
+      <div className="flex items-center gap-4 mb-6">
+        <Avatar subject={subject} size={52} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="sp-font-display font-bold text-2xl">{exam.title}</h1>
+            <Chip color={meta.color}>{exam.type}</Chip>
+          </div>
+          <p className="text-sm mt-0.5" style={{ color: "var(--text-muted)" }}>{subject?.name} · {fmtDateLong(exam.date)}{exam.description ? ` · ${exam.description}` : ""}</p>
+        </div>
+        <Chip color={daysUntil(exam.date) <= 1 && !past ? "rose" : "muted"}>{untilLabel(exam.date)}</Chip>
+      </div>
+
+      <div className="sp-card p-5 mb-5">
+        <SectionTitle icon={Layers} title="Relevanter Lernstoff" />
+        {relevant.length === 0 ? (
+          <p className="text-sm" style={{ color: "var(--text-faint)" }}>Kein passender Lernstoff gefunden. Lade Hefteinträge für {subject?.name} hoch, damit StudyPilot den Stoff zuordnen kann.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {relevant.map((r) => (
+              <button key={r.id} onClick={() => onOpenSubject && onOpenSubject(r.subjectId)} className="w-full text-left flex items-center gap-2.5 p-2.5 rounded-xl sp-nav-item" style={{ background: "var(--bg-soft)" }}>
+                <span className="text-xs shrink-0" style={{ color: "var(--text-faint)" }}>{fmtDate(r.date)}</span>
+                <span className="text-xs truncate" style={{ color: "var(--text-muted)" }}>{r.summary}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {!past && relevant.length > 0 && (
+        <div className="sp-card p-5 mb-5">
+          <SectionTitle icon={CalendarDays} title="Lernplan" />
+          <StudyPlanView exam={exam} relevantEntries={relevant} />
+        </div>
+      )}
+
+      <div className="sp-card p-5">
+        <SectionTitle icon={FileCheck2} title="Prüfungssimulation" />
+        <ExamSimulation exam={exam} subject={subject} relevantEntries={relevant} settings={data.settings} simState={simState} onSaveSim={saveSim} />
+      </div>
     </div>
   );
 }
@@ -2682,6 +3189,129 @@ function HomeworkModal({ open, onClose, onSave, subjects }) {
         <button onClick={() => { onSave({ ...form, id: uid(), done: false }); onClose(); }} disabled={!form.description} className="sp-btn-primary w-full py-3 text-sm mt-2 disabled:opacity-40">Speichern</button>
       </div>
     </Modal>
+  );
+}
+
+function TODO_TYPE_META(type) {
+  if (type === "srs") return { icon: Flame, color: "rose" };
+  if (type === "homework") return { icon: ListTodo, color: "amber" };
+  if (type === "examplan") return { icon: CalendarDays, color: "teal" };
+  return { icon: BookOpen, color: "accent" };
+}
+
+function TodoPage({ data, subjects, onStartTodo }) {
+  const todos = useMemo(() => computeTodayTodos(data, subjects), [data, subjects]);
+  return (
+    <div className="sp-fade-in max-w-3xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
+      <div className="mb-5">
+        <h1 className="sp-font-display font-bold text-2xl">To-Do heute</h1>
+        <p className="text-sm mt-0.5" style={{ color: "var(--text-muted)" }}>{fmtDateLong(todayISO())}</p>
+      </div>
+      {todos.length === 0 ? (
+        <EmptyState icon={ListChecks} title="Nichts Dringendes heute" subtitle="Genieß den Tag – schau später nochmal vorbei." />
+      ) : (
+        <div className="space-y-2.5">
+          {todos.map((todo) => {
+            const meta = TODO_TYPE_META(todo.type);
+            const Icon = meta.icon;
+            return (
+              <div key={todo.id} className="sp-card p-4 flex items-center gap-4">
+                <Avatar subject={todo.subject} size={42} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <Icon size={12} style={{ color: `var(--${meta.color})` }} />
+                    <span className="sp-eyebrow">{todo.type === "srs" ? "Lernmodus" : todo.type === "homework" ? "Hausaufgabe" : todo.type === "examplan" ? "Lernplan" : "Wiederholen"}</span>
+                  </div>
+                  <p className="text-sm font-medium truncate">{todo.title}</p>
+                  {todo.subtitle && <p className="text-xs truncate" style={{ color: "var(--text-muted)" }}>{todo.subtitle}</p>}
+                </div>
+                <button onClick={() => onStartTodo(todo)} className="sp-btn-primary px-4 py-2.5 text-sm flex items-center gap-1.5 shrink-0"><Play size={14} />Beginnen</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FocusView({ todo, data, setData, onExit, onOpenSubject }) {
+  const subjectEntries = useMemo(() => data.entries.filter((e) => e.subjectId === todo.subjectId).sort((a, b) => b.date.localeCompare(a.date)), [data.entries, todo.subjectId]);
+
+  if (todo.type === "srs") {
+    const updateTermSrs = (entryId, termId, patch) => setData((d) => ({
+      ...d, entries: d.entries.map((e) => e.id !== entryId ? e : { ...e, terms: e.terms.map((t) => t.id === termId ? { ...t, ...patch } : t) }),
+    }));
+    return (
+      <div className="sp-fade-in min-h-screen px-4 sm:px-6 pt-6 pb-10 max-w-2xl mx-auto">
+        <button onClick={onExit} className="flex items-center gap-1.5 text-sm mb-4 sp-nav-item px-2 py-1 rounded-lg -ml-2" style={{ color: "var(--text-muted)" }}><ArrowLeft size={15} />Zurück zu To-Do</button>
+        <div className="flex items-center gap-3 mb-6">
+          <Avatar subject={todo.subject} size={44} />
+          <h1 className="sp-font-display font-bold text-xl">{todo.subject?.name} wiederholen</h1>
+        </div>
+        <LearnSession subjectId={todo.subjectId} entries={subjectEntries} onUpdateTerm={updateTermSrs} onExit={onExit} />
+      </div>
+    );
+  }
+
+  if (todo.type === "homework") {
+    const homework = data.homework.find((h) => h.id === todo.homeworkId);
+    const markDone = () => {
+      setData((d) => ({ ...d, homework: d.homework.map((h) => h.id === todo.homeworkId ? { ...h, done: true } : h) }));
+      onExit();
+    };
+    return (
+      <div className="sp-fade-in min-h-screen flex flex-col items-center justify-center px-6 text-center">
+        <button onClick={onExit} className="absolute top-6 left-4 flex items-center gap-1.5 text-sm sp-nav-item px-2 py-1 rounded-lg" style={{ color: "var(--text-muted)" }}><ArrowLeft size={15} />Zurück</button>
+        <Avatar subject={todo.subject} size={64} />
+        <h1 className="sp-font-display font-bold text-xl mt-5 mb-2 max-w-md">{homework?.description || todo.title}</h1>
+        <p className="text-sm mb-8" style={{ color: "var(--text-muted)" }}>{todo.subject?.name}{homework?.dueDate ? ` · fällig ${fmtDate(homework.dueDate)}` : ""}</p>
+        <button onClick={markDone} className="sp-btn-primary px-6 py-3 text-sm flex items-center gap-2"><Check size={16} />Als erledigt markieren</button>
+      </div>
+    );
+  }
+
+  // "study" (Vorbereitung auf morgen) oder "examplan" (Tagesaufgabe aus dem Lernplan)
+  const relevantEntries = todo.type === "examplan"
+    ? relevantEntriesForExam(data.exams.find((e) => e.id === todo.examId), data.entries)
+    : subjectEntries.slice(0, todo.level >= 3 ? 2 : 1);
+
+  return (
+    <div className="sp-fade-in min-h-screen px-4 sm:px-6 pt-6 pb-10 max-w-2xl mx-auto">
+      <button onClick={onExit} className="flex items-center gap-1.5 text-sm mb-4 sp-nav-item px-2 py-1 rounded-lg -ml-2" style={{ color: "var(--text-muted)" }}><ArrowLeft size={15} />Zurück zu To-Do</button>
+      <div className="flex items-center gap-3 mb-6">
+        <Avatar subject={todo.subject} size={44} />
+        <div>
+          <h1 className="sp-font-display font-bold text-xl">{todo.title}</h1>
+          {todo.subtitle && <p className="text-xs" style={{ color: "var(--text-muted)" }}>{todo.subtitle}</p>}
+        </div>
+      </div>
+      {relevantEntries.length === 0 ? (
+        <EmptyState icon={FileText} title="Keine Hefteinträge gefunden" subtitle="Für dieses Fach wurde noch nichts hochgeladen." />
+      ) : (
+        <div className="space-y-4 mb-6">
+          {relevantEntries.map((e) => (
+            <div key={e.id} className="sp-card p-5">
+              <p className="text-xs font-semibold mb-2" style={{ color: "var(--text-faint)" }}>{fmtDateLong(e.date)}</p>
+              <p className="text-sm leading-relaxed mb-3">{e.summary}</p>
+              <ul className="text-sm space-y-1 list-disc list-inside mb-3" style={{ color: "var(--text-muted)" }}>
+                {e.bullets.map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+              {e.formulas.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {e.formulas.map((f, i) => <span key={i} className="sp-font-display text-xs font-semibold px-2.5 py-1 rounded-lg" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>{f}</span>)}
+                </div>
+              )}
+              {e.merkkasten && <div className="rounded-xl p-3 text-sm" style={{ background: "var(--amber-soft)", color: "var(--amber)" }}>💡 {e.merkkasten}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <button onClick={() => onOpenSubject(todo.subjectId)} className="sp-btn-secondary flex-1 py-3 text-sm">Zum Fach (Quiz & Tutor)</button>
+        <button onClick={onExit} className="sp-btn-primary flex-1 py-3 text-sm flex items-center justify-center gap-1.5"><Check size={15} />Fertig gelesen</button>
+      </div>
+    </div>
   );
 }
 
@@ -2739,9 +3369,10 @@ function DataBackupSection({ data, setData }) {
 
   const exportData = () => {
     const payload = {
-      exportedAt: new Date().toISOString(), app: "StudyPilot", version: 2,
+      exportedAt: new Date().toISOString(), app: "StudyPilot", version: 3,
       settings: data.settings, subjects: data.subjects, schedule: data.schedule,
       exams: data.exams, homework: data.homework, entries: data.entries, chats: data.chats || {},
+      examSims: data.examSims || {},
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2766,6 +3397,7 @@ function DataBackupSection({ data, setData }) {
           homework: parsed.homework || [],
           entries: parsed.entries || [],
           chats: parsed.chats || {},
+          examSims: parsed.examSims || {},
         }));
         setStatus({ type: "ok", msg: "Backup erfolgreich importiert." });
       } catch (err) {
@@ -2929,13 +3561,14 @@ function useSearchResults(query, data, subjects) {
 /* ------------------------------------------------------------------ */
 const NAV_ITEMS = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { key: "todo", label: "To-Do", icon: ListChecks },
   { key: "schedule", label: "Stundenplan", icon: CalendarDays },
   { key: "subjects", label: "Fächer", icon: BookOpen },
   { key: "exams", label: "Prüfungen", icon: ClipboardCheck },
   { key: "homework", label: "Hausaufgaben", icon: ListTodo },
   { key: "settings", label: "Einstellungen", icon: SettingsIcon },
 ];
-const MOBILE_NAV = ["dashboard", "schedule", "subjects", "exams", "settings"];
+const MOBILE_NAV = ["dashboard", "todo", "subjects", "exams", "settings"];
 
 function Sidebar({ page, onNav, settings }) {
   return (
@@ -2949,8 +3582,12 @@ function Sidebar({ page, onNav, settings }) {
       <nav className="flex flex-col gap-1">
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;
+          const active = page === item.key
+            || (item.key === "subjects" && page === "subject")
+            || (item.key === "exams" && page === "examDetail")
+            || (item.key === "todo" && page === "focus");
           return (
-            <button key={item.key} onClick={() => onNav(item.key)} className={`sp-nav-item flex items-center gap-3 px-3 py-2.5 text-sm ${page === item.key ? "active" : ""}`}>
+            <button key={item.key} onClick={() => onNav(item.key)} className={`sp-nav-item flex items-center gap-3 px-3 py-2.5 text-sm ${active ? "active" : ""}`}>
               <Icon size={17} /> {item.label}
             </button>
           );
@@ -2975,7 +3612,10 @@ function BottomNav({ page, onNav }) {
       {MOBILE_NAV.map((key) => {
         const item = NAV_ITEMS.find((n) => n.key === key);
         const Icon = item.icon;
-        const active = page === key || (key === "subjects" && page === "subject");
+        const active = page === key
+          || (key === "subjects" && page === "subject")
+          || (key === "exams" && page === "examDetail")
+          || (key === "todo" && page === "focus");
         return (
           <button key={key} onClick={() => onNav(key)} className="flex-1 flex flex-col items-center justify-center gap-0.5 py-2.5">
             <div
@@ -3148,7 +3788,7 @@ class ErrorBoundary extends React.Component {
   }
   handleReset = async () => {
     try {
-      const keys = ["settings", "subjects", "schedule", "exams", "homework", "entries", "chats"];
+      const keys = ["settings", "subjects", "schedule", "exams", "homework", "entries", "chats", "examSims"];
       for (const k of keys) {
         try { await window.storage.delete(k, false); } catch (e) { /* Key existierte evtl. nicht */ }
       }
@@ -3316,9 +3956,11 @@ function OnboardingWizard({ onComplete }) {
 
 function StudyPilotAppInner() {
   const [loaded, setLoaded] = useState(false);
-  const [data, setData] = useState({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {} });
+  const [data, setData] = useState({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {}, examSims: {} });
   const [page, setPage] = useState("dashboard");
   const [activeSubjectId, setActiveSubjectId] = useState(null);
+  const [activeExamId, setActiveExamId] = useState(null);
+  const [focusTask, setFocusTask] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadDefaultSubject, setUploadDefaultSubject] = useState(null);
   const [query, setQuery] = useState("");
@@ -3344,7 +3986,7 @@ function StudyPilotAppInner() {
       }
 
       try {
-        const keys = ["settings", "subjects", "schedule", "exams", "homework", "entries", "chats"];
+        const keys = ["settings", "subjects", "schedule", "exams", "homework", "entries", "chats", "examSims"];
         const loadedData = {};
         for (const k of keys) {
           const r = await safeStorageGet(k);
@@ -3363,9 +4005,10 @@ function StudyPilotAppInner() {
           homework: sanitizeHomework(loadedData.homework),
           entries: sanitizeEntries(loadedData.entries),
           chats: (loadedData.chats && typeof loadedData.chats === "object" && !Array.isArray(loadedData.chats)) ? loadedData.chats : {},
+          examSims: (loadedData.examSims && typeof loadedData.examSims === "object" && !Array.isArray(loadedData.examSims)) ? loadedData.examSims : {},
         });
       } catch (e) {
-        setData({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {} });
+        setData({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {}, examSims: {} });
       } finally {
         setLoaded(true);
       }
@@ -3388,11 +4031,15 @@ function StudyPilotAppInner() {
   useEffect(() => { persistKey("homework", data.homework); }, [data.homework, loaded, persistKey]);
   useEffect(() => { persistKey("entries", data.entries); }, [data.entries, loaded, persistKey]);
   useEffect(() => { persistKey("chats", data.chats); }, [data.chats, loaded, persistKey]);
+  useEffect(() => { persistKey("examSims", data.examSims); }, [data.examSims, loaded, persistKey]);
 
   const subjects = data.subjects;
   const searchResults = useSearchResults(query, data, subjects);
 
   const openSubject = (id) => { setActiveSubjectId(id); setPage("subject"); setMobileMenuOpen(false); window.scrollTo(0, 0); };
+  const openExam = (id) => { setActiveExamId(id); setPage("examDetail"); setMobileMenuOpen(false); window.scrollTo(0, 0); };
+  const startTodo = (todo) => { setFocusTask(todo); setPage("focus"); window.scrollTo(0, 0); };
+  const exitFocus = () => { setFocusTask(null); setPage("todo"); window.scrollTo(0, 0); };
   const goPage = (p) => { setPage(p); setMobileMenuOpen(false); window.scrollTo(0, 0); };
   const openUpload = (subjectId) => { setUploadDefaultSubject(subjectId || null); setUploadOpen(true); };
 
@@ -3434,6 +4081,7 @@ function StudyPilotAppInner() {
   }
 
   const activeSubject = subjects.find((s) => s.id === activeSubjectId);
+  const activeExam = data.exams.find((e) => e.id === activeExamId);
 
   return (
     <div className="sp-root min-h-screen" data-theme={data.settings.theme} onClick={() => searchOpen && setSearchOpen(false)}>
@@ -3453,13 +4101,20 @@ function StudyPilotAppInner() {
           </div>
 
           <StorageStatusBanner status={saveStatus} error={saveError} onGoBackup={() => goPage("settings")} />
-          {page === "dashboard" && <Dashboard data={data} subjects={subjects} onOpenSubject={openSubject} onUpload={() => openUpload(null)} onGoPage={goPage} />}
+          {page === "dashboard" && <Dashboard data={data} subjects={subjects} onOpenSubject={openSubject} onOpenExam={openExam} onUpload={() => openUpload(null)} onGoPage={goPage} />}
+          {page === "todo" && <TodoPage data={data} subjects={subjects} onStartTodo={startTodo} />}
+          {page === "focus" && focusTask && (
+            <FocusView todo={focusTask} data={data} setData={setData} onExit={exitFocus} onOpenSubject={openSubject} />
+          )}
           {page === "schedule" && <SchedulePage data={data} setData={setData} subjects={subjects} />}
           {page === "subjects" && <SubjectsPage data={data} setData={setData} subjects={subjects} onOpenSubject={openSubject} onAddSubject={addSubject} />}
           {page === "subject" && activeSubject && (
             <SubjectDetail key={activeSubject.id} subject={activeSubject} data={data} setData={setData} onBack={() => goPage("subjects")} onUpload={openUpload} />
           )}
-          {page === "exams" && <ExamsPage data={data} setData={setData} subjects={subjects} onOpenSubject={openSubject} />}
+          {page === "exams" && <ExamsPage data={data} setData={setData} subjects={subjects} onOpenExam={openExam} />}
+          {page === "examDetail" && activeExam && (
+            <ExamDetail key={activeExam.id} exam={activeExam} subjects={subjects} data={data} setData={setData} onBack={() => goPage("exams")} onOpenSubject={openSubject} />
+          )}
           {page === "homework" && <HomeworkPage data={data} setData={setData} subjects={subjects} />}
           {page === "settings" && <SettingsPage data={data} setData={setData} saveStatus={saveStatus} saveError={saveError} />}
         </div>
