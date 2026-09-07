@@ -295,8 +295,8 @@ function computeLearningPlan({ schedule, exams, subjects, currentWeekType }) {
 
 const MASTERY_TIERS = [
   { max: 1, label: "Unsicher", color: "var(--rose)", bg: "var(--rose-soft)" },
-  { max: 3, label: "Wird besser", color: "var(--amber)", bg: "var(--amber-soft)" },
-  { max: 6, label: "Sitzt", color: "var(--teal)", bg: "var(--teal-soft)" },
+  { max: 4, label: "Wird besser", color: "var(--amber)", bg: "var(--amber-soft)" },
+  { max: 8, label: "Sitzt", color: "var(--teal)", bg: "var(--teal-soft)" },
 ];
 function masteryTier(box) {
   const b = box || 1;
@@ -446,6 +446,86 @@ function computeTodayTodos(data, subjects) {
   return todos;
 }
 
+const GRADE_TYPES = [
+  { key: "schriftlich", label: "Schriftlich" },
+  { key: "muendlich", label: "Mündlich" },
+];
+
+function sanitizeGrades(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out = {};
+  Object.keys(raw).forEach((subjectId) => {
+    const list = raw[subjectId];
+    if (!Array.isArray(list)) return;
+    out[subjectId] = list.filter((g) => g && typeof g === "object").map((g) => ({
+      id: g.id || uid(),
+      value: Number(g.value) >= 1 && Number(g.value) <= 6 ? Number(g.value) : 4,
+      type: g.type === "muendlich" ? "muendlich" : "schriftlich",
+      weight: Number(g.weight) > 0 ? Number(g.weight) : 1,
+      title: typeof g.title === "string" ? g.title : "",
+      date: typeof g.date === "string" ? g.date : todayISO(),
+      examId: g.examId || null,
+    }));
+  });
+  return out;
+}
+
+// Gewichteter Durchschnitt einer Notenliste (niedriger = besser, deutsches 1-6 System).
+function weightedAvg(list) {
+  if (!list.length) return null;
+  const sumW = list.reduce((s, g) => s + g.weight, 0);
+  if (sumW === 0) return null;
+  return list.reduce((s, g) => s + g.value * g.weight, 0) / sumW;
+}
+
+// Gesamtschnitt eines Fachs unter Berücksichtigung der schriftlich/mündlich-Gewichtung.
+// Fehlt eine Kategorie komplett, zählt nur die vorhandene (kein künstliches Downgrade durch eine "0").
+function computeSubjectGradeStats(grades, weightSchriftlich) {
+  const list = grades || [];
+  const schriftlich = list.filter((g) => g.type === "schriftlich");
+  const muendlich = list.filter((g) => g.type === "muendlich");
+  const avgS = weightedAvg(schriftlich);
+  const avgM = weightedAvg(muendlich);
+  const pctS = (weightSchriftlich ?? 50) / 100;
+  const pctM = 1 - pctS;
+  let overall = null;
+  if (avgS !== null && avgM !== null) overall = avgS * pctS + avgM * pctM;
+  else if (avgS !== null) overall = avgS;
+  else if (avgM !== null) overall = avgM;
+  return { avgS, avgM, overall, count: list.length };
+}
+
+// Löst: "Welche Note brauche ich in der nächsten Arbeit (Kategorie/Gewicht), um auf targetOverall zu kommen?"
+// Gibt die benötigte Note zurück (kann rechnerisch <1 oder >6 sein - Anzeige klemmt das verständlich ein).
+function computeNeededGrade({ grades, weightSchriftlich, targetOverall, newCategory, newWeight }) {
+  const list = grades || [];
+  const schriftlich = list.filter((g) => g.type === "schriftlich");
+  const muendlich = list.filter((g) => g.type === "muendlich");
+  const avgS = weightedAvg(schriftlich);
+  const avgM = weightedAvg(muendlich);
+  const pctS = (weightSchriftlich ?? 50) / 100;
+  const pctM = 1 - pctS;
+
+  const otherAvg = newCategory === "schriftlich" ? avgM : avgS;
+  const pctOther = newCategory === "schriftlich" ? pctM : pctS;
+  const pctNew = newCategory === "schriftlich" ? pctS : pctM;
+
+  let neededCategoryAvg;
+  if (otherAvg === null || pctOther === 0) {
+    neededCategoryAvg = targetOverall; // nur die neue Kategorie zählt aktuell
+  } else if (pctNew === 0) {
+    return { neededValue: null, note: `${newCategory === "schriftlich" ? "Schriftliche" : "Mündliche"} Noten zählen bei diesem Fach mit 0% – diese Note ändert am Schnitt nichts.` };
+  } else {
+    neededCategoryAvg = (targetOverall - otherAvg * pctOther) / pctNew;
+  }
+
+  const currentList = newCategory === "schriftlich" ? schriftlich : muendlich;
+  const currentSum = currentList.reduce((s, g) => s + g.value * g.weight, 0);
+  const currentWeight = currentList.reduce((s, g) => s + g.weight, 0);
+  const neededValue = (neededCategoryAvg * (currentWeight + newWeight) - currentSum) / newWeight;
+  return { neededValue, note: null };
+}
+
 function downscaleImage(file, maxW = 900, quality = 0.72) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -464,6 +544,16 @@ function downscaleImage(file, maxW = 900, quality = 0.72) {
       img.onerror = reject;
       img.src = e.target.result;
     };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Für Nicht-Bild-Dokumente (z.B. PDF-Arbeitsblätter): unverändert als Base64 einlesen, kein Downscaling.
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve({ dataUrl: e.target.result, mediaType: file.type || "application/pdf", name: file.name });
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
@@ -524,12 +614,16 @@ function splitDataUrl(dataUrl) {
   return { mediaType: m[1], base64: m[2] };
 }
 
-async function callClaudeVision(images, subjectNames) {
+async function callClaudeVision(images, documents, subjectNames) {
   const prompt = buildAnalysisPrompt(subjectNames);
   const content = [
     ...images.map((img) => {
       const { mediaType, base64 } = splitDataUrl(img);
       return { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } };
+    }),
+    ...(documents || []).map((doc) => {
+      const { mediaType, base64 } = splitDataUrl(doc.dataUrl);
+      return { type: "document", source: { type: "base64", media_type: mediaType || "application/pdf", data: base64 } };
     }),
     { type: "text", text: prompt },
   ];
@@ -602,12 +696,13 @@ async function callOpenRouterVision(apiKey, model, images, subjectNames) {
   throw lastError || new Error("OpenRouter-Anfrage fehlgeschlagen");
 }
 
-async function runAIAnalysis({ provider, openrouterApiKey, openrouterModel, images, subjectNames }) {
+async function runAIAnalysis({ provider, openrouterApiKey, openrouterModel, images, documents, subjectNames }) {
   if (provider === "openrouter") {
+    if ((documents || []).length > 0) throw new Error("PDF/Dokumente werden von OpenRouter-Modellen nicht unterstützt. Bitte zu „Claude (integriert)“ wechseln oder das Dokument als Foto/Screenshot hochladen.");
     if (!openrouterApiKey) throw new Error("Kein OpenRouter-API-Key hinterlegt (Einstellungen → KI).");
     return callOpenRouterVision(openrouterApiKey, openrouterModel, images, subjectNames);
   }
-  return callClaudeVision(images, subjectNames);
+  return callClaudeVision(images, documents, subjectNames);
 }
 
 /* KI-Tutor: beantwortet Fragen NUR auf Basis der eigenen Hefteinträge des Fachs ------ */
@@ -1007,6 +1102,7 @@ function seedSubjects() {
   return names.map((n, i) => ({
     id: uid(), name: n, color: SUBJECT_PALETTE[i % SUBJECT_PALETTE.length],
     quizFrequency: frequentByDefault.has(n) ? "frequent" : "occasional",
+    weightSchriftlich: 50,
   }));
 }
 function seedSchedule(subjects) {
@@ -1562,7 +1658,7 @@ function SchedulePage({ data, setData, subjects }) {
       const findOrCreate = (name) => {
         const match = subjectsNext.find((s) => s.name.toLowerCase() === (name || "").toLowerCase());
         if (match) return match.id;
-        const created = { id: uid(), name: (name || "Unbekannt").trim(), color: SUBJECT_PALETTE[subjectsNext.length % SUBJECT_PALETTE.length], quizFrequency: "occasional" };
+        const created = { id: uid(), name: (name || "Unbekannt").trim(), color: SUBJECT_PALETTE[subjectsNext.length % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 50 };
         subjectsNext = [...subjectsNext, created];
         return created.id;
       };
@@ -1661,18 +1757,20 @@ function UploadModal({ open, onClose, subjects, defaultSubjectId, settings, onSa
   const [subjectId, setSubjectId] = useState(defaultSubjectId || subjects[0]?.id || "");
   const [date, setDate] = useState(todayISO());
   const [images, setImages] = useState([]);
+  const [documents, setDocuments] = useState([]);
   const [processStep, setProcessStep] = useState(0);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [usedFallback, setUsedFallback] = useState(false);
   const cameraInputRef = useRef(null);
   const galleryInputRef = useRef(null);
+  const docInputRef = useRef(null);
   const cancelledRef = useRef(false);
 
   useEffect(() => {
     if (open) {
       setStep("select"); setSubjectId(defaultSubjectId || subjects[0]?.id || ""); setDate(todayISO());
-      setImages([]); setProcessStep(0); setResult(null); setError(null); setUsedFallback(false);
+      setImages([]); setDocuments([]); setProcessStep(0); setResult(null); setError(null); setUsedFallback(false);
       cancelledRef.current = false;
     } else {
       cancelledRef.current = true;
@@ -1683,6 +1781,12 @@ function UploadModal({ open, onClose, subjects, defaultSubjectId, settings, onSa
     const arr = Array.from(files);
     const previews = await Promise.all(arr.map((f) => downscaleImage(f)));
     setImages((prev) => [...prev, ...previews].slice(0, 6));
+  };
+
+  const handleDocs = async (files) => {
+    const arr = Array.from(files).filter((f) => f.type === "application/pdf");
+    const docs = await Promise.all(arr.map((f) => readFileAsDataURL(f)));
+    setDocuments((prev) => [...prev, ...docs].slice(0, 3));
   };
 
   const runStepAnimation = (onDone) => {
@@ -1710,6 +1814,7 @@ function UploadModal({ open, onClose, subjects, defaultSubjectId, settings, onSa
           openrouterApiKey: settings.openrouterApiKey,
           openrouterModel: settings.openrouterModel,
           images,
+          documents,
           subjectNames,
         });
         if (cancelledRef.current) return;
@@ -1738,7 +1843,8 @@ function UploadModal({ open, onClose, subjects, defaultSubjectId, settings, onSa
       ...t, id: uid(), srsBox: 1, srsDue: todayISO(),
     }));
     onSave({
-      id: uid(), subjectId, date, images: images, image: images[0] || null, createdAt: Date.now(),
+      id: uid(), subjectId, date, images: images, image: images[0] || null,
+      documents: documents.map((d) => ({ name: d.name, dataUrl: d.dataUrl })), createdAt: Date.now(),
       ocrText: result.ocrText || result.ocrRaw || "", summary: result.summary, bullets: result.bullets,
       terms: termsWithSrs, formulas: result.formulas, merkkasten: result.merkkasten,
     });
@@ -1802,6 +1908,34 @@ function UploadModal({ open, onClose, subjects, defaultSubjectId, settings, onSa
               </div>
             )}
 
+            <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>Oder: Arbeitsblatt/Skript als PDF</label>
+            <button
+              type="button"
+              onClick={() => docInputRef.current?.click()}
+              className="w-full rounded-2xl border-2 border-dashed p-4 flex items-center justify-center gap-2 mb-2"
+              style={{ borderColor: "var(--border-strong)", background: "var(--bg-soft)" }}
+            >
+              <FileJson size={18} style={{ color: "var(--text-faint)" }} />
+              <p className="text-sm font-medium">PDF hochladen</p>
+              <input ref={docInputRef} type="file" accept="application/pdf" multiple className="hidden" onChange={(e) => { handleDocs(e.target.files); e.target.value = ""; }} />
+            </button>
+            {documents.length > 0 && (
+              <div className="space-y-1.5 mb-3">
+                {documents.map((doc, i) => (
+                  <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{ background: "var(--bg-soft)" }}>
+                    <FileJson size={14} style={{ color: "var(--text-faint)" }} />
+                    <span className="text-xs truncate flex-1" style={{ color: "var(--text-muted)" }}>{doc.name}</span>
+                    <button onClick={() => setDocuments(documents.filter((_, j) => j !== i))}><X size={13} style={{ color: "var(--text-faint)" }} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {documents.length > 0 && settings.aiProvider === "openrouter" && (
+              <div className="rounded-xl p-3 mb-3 text-xs" style={{ background: "var(--rose-soft)", color: "var(--rose)" }}>
+                ⚠️ PDFs funktionieren nur mit „Claude (integriert)“, nicht mit OpenRouter. Wechsle den KI-Anbieter in den Einstellungen oder lade das PDF stattdessen als Foto/Screenshot hoch.
+              </div>
+            )}
+
             <div className="flex items-center gap-1.5 mb-3 text-xs" style={{ color: "var(--text-faint)" }}>
               <BrainCircuit size={13} />
               {settings.aiProvider === "openrouter"
@@ -1809,7 +1943,11 @@ function UploadModal({ open, onClose, subjects, defaultSubjectId, settings, onSa
                 : "KI-Anbieter: Claude (kostenlos, in StudyPilot integriert)"}
             </div>
 
-            <button disabled={images.length === 0} onClick={startProcessing} className="sp-btn-primary w-full py-3 text-sm disabled:opacity-40 flex items-center justify-center gap-2">
+            <button
+              disabled={images.length === 0 && documents.length === 0}
+              onClick={startProcessing}
+              className="sp-btn-primary w-full py-3 text-sm disabled:opacity-40 flex items-center justify-center gap-2"
+            >
               <Sparkles size={16} /> Hochladen & analysieren
             </button>
           </div>
@@ -1921,6 +2059,8 @@ function SubjectsPage({ data, setData, subjects, onOpenSubject, onAddSubject }) 
     const removedExamIds = new Set(d.exams.filter((e) => e.subjectId === id).map((e) => e.id));
     const nextExamSims = { ...d.examSims };
     removedExamIds.forEach((examId) => delete nextExamSims[examId]);
+    const nextGrades = { ...d.grades };
+    delete nextGrades[id];
     return {
       ...d,
       subjects: d.subjects.filter((s) => s.id !== id),
@@ -1930,6 +2070,7 @@ function SubjectsPage({ data, setData, subjects, onOpenSubject, onAddSubject }) 
       entries: d.entries.filter((e) => e.subjectId !== id),
       chats: nextChats,
       examSims: nextExamSims,
+      grades: nextGrades,
     };
   });
 
@@ -2005,7 +2146,7 @@ function Flashcard({ term, def }) {
   );
 }
 
-const SRS_INTERVALS = [1, 2, 4, 8, 16, 32]; // Tage je Box (Leitner-System)
+const SRS_INTERVALS = [1, 2, 4, 8, 16, 32, 64, 120]; // Tage je Box (Leitner-System) - bis zu ~4 Monate für echte Langzeit-Bindung
 
 function LearnSession({ subjectId, entries, onUpdateTerm, onExit }) {
   const dueTerms = useMemo(() => {
@@ -2672,11 +2813,17 @@ function SubjectDetail({ subject, data, setData, onBack, onUpload }) {
           <div className="grid sm:grid-cols-2 gap-4">
             {entries.map((e) => {
               const imgs = e.images && e.images.length ? e.images : (e.image ? [e.image] : []);
+              const hasDocs = e.documents && e.documents.length > 0;
               return (
                 <button key={e.id} onClick={() => setEditEntry(e)} className="sp-card sp-card-hover p-4 flex gap-3 text-left">
                   <div className="relative shrink-0">
-                    {imgs[0] ? <img src={imgs[0]} className="w-20 h-20 rounded-xl object-cover" style={{ border: "1px solid var(--border)" }} /> : <div className="w-20 h-20 rounded-xl" style={{ background: "var(--bg-soft)" }} />}
+                    {imgs[0] ? <img src={imgs[0]} className="w-20 h-20 rounded-xl object-cover" style={{ border: "1px solid var(--border)" }} /> : (
+                      <div className="w-20 h-20 rounded-xl flex items-center justify-center" style={{ background: "var(--bg-soft)" }}>
+                        {hasDocs && <FileJson size={22} style={{ color: "var(--text-faint)" }} />}
+                      </div>
+                    )}
                     {imgs.length > 1 && <span className="absolute -bottom-1.5 -right-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: "var(--accent)", color: "#fff" }}>+{imgs.length - 1}</span>}
+                    {hasDocs && imgs.length > 0 && <span className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full flex items-center justify-center" style={{ background: "var(--teal)", color: "#fff" }}><FileJson size={11} /></span>}
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2">
@@ -3058,7 +3205,12 @@ function ExamsPage({ data, setData, subjects, onOpenExam }) {
     setData((d) => {
       const nextExamSims = { ...d.examSims };
       delete nextExamSims[id];
-      return { ...d, exams: d.exams.filter((x) => x.id !== id), examSims: nextExamSims };
+      const removedExam = d.exams.find((x) => x.id === id);
+      let nextGrades = d.grades;
+      if (removedExam?.resultGradeId) {
+        nextGrades = { ...d.grades, [removedExam.subjectId]: (d.grades[removedExam.subjectId] || []).filter((g) => g.id !== removedExam.resultGradeId) };
+      }
+      return { ...d, exams: d.exams.filter((x) => x.id !== id), examSims: nextExamSims, grades: nextGrades };
     });
   };
 
@@ -3104,6 +3256,78 @@ function ExamsPage({ data, setData, subjects, onOpenExam }) {
         </div>
       )}
       <ExamModal open={modalOpen} onClose={() => setModalOpen(false)} onSave={addExam} subjects={subjects} />
+    </div>
+  );
+}
+
+function ExamResultSection({ exam, subject, setData }) {
+  const [editing, setEditing] = useState(!exam.resultGrade);
+  const [value, setValue] = useState(exam.resultGrade ? String(exam.resultGrade) : "2.0");
+  const [gradeType, setGradeType] = useState(exam.type === "Referat" ? "muendlich" : "schriftlich");
+  const [weight, setWeight] = useState(exam.type === "Schulaufgabe" ? "2" : "1");
+  const [note, setNote] = useState(exam.resultNote || "");
+
+  const save = () => {
+    const numValue = Number(value);
+    if (!(numValue >= 1 && numValue <= 6)) return;
+    const gradeId = exam.resultGradeId || uid();
+    const gradeRecord = { id: gradeId, value: numValue, type: gradeType, weight: Number(weight) || 1, title: exam.title, date: exam.date, examId: exam.id };
+
+    setData((d) => {
+      const subjectGrades = d.grades[exam.subjectId] || [];
+      const exists = subjectGrades.some((g) => g.id === gradeId);
+      const nextSubjectGrades = exists ? subjectGrades.map((g) => g.id === gradeId ? gradeRecord : g) : [...subjectGrades, gradeRecord];
+      return {
+        ...d,
+        grades: { ...d.grades, [exam.subjectId]: nextSubjectGrades },
+        exams: d.exams.map((e) => e.id === exam.id ? { ...e, resultGrade: numValue, resultNote: note, resultGradeId: gradeId } : e),
+      };
+    });
+    setEditing(false);
+  };
+
+  const clear = () => {
+    setData((d) => ({
+      ...d,
+      grades: { ...d.grades, [exam.subjectId]: (d.grades[exam.subjectId] || []).filter((g) => g.id !== exam.resultGradeId) },
+      exams: d.exams.map((e) => e.id === exam.id ? { ...e, resultGrade: null, resultNote: "", resultGradeId: null } : e),
+    }));
+    setEditing(true);
+    setValue("2.0"); setNote("");
+  };
+
+  if (!editing && exam.resultGrade) {
+    return (
+      <div className="flex items-start gap-3">
+        <div className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0" style={{ background: "var(--accent-soft)" }}>
+          <span className="sp-font-display font-bold text-lg" style={{ color: "var(--accent)" }}>{exam.resultGrade.toFixed(1)}</span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm">Ergebnis eingetragen – fließt in den Notenschnitt für {subject?.name} ein.</p>
+          {exam.resultNote && <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>{exam.resultNote}</p>}
+        </div>
+        <button onClick={() => setEditing(true)} className="p-1.5 rounded-full sp-nav-item"><Pencil size={14} style={{ color: "var(--text-faint)" }} /></button>
+        <button onClick={clear} className="p-1.5 rounded-full sp-nav-item"><Trash2 size={14} style={{ color: "var(--text-faint)" }} /></button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p className="text-sm mb-3" style={{ color: "var(--text-muted)" }}>Trag dein tatsächliches Ergebnis ein – es zählt automatisch zu deinem Notenschnitt in {subject?.name}.</p>
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <Field label="Note"><input type="number" step="0.1" min="1" max="6" className="sp-input w-full px-2.5 py-2 text-sm" value={value} onChange={(e) => setValue(e.target.value)} /></Field>
+        <Field label="Art">
+          <select className="sp-input w-full px-2.5 py-2 text-sm" value={gradeType} onChange={(e) => setGradeType(e.target.value)}>
+            {GRADE_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+          </select>
+        </Field>
+        <Field label="Gewicht"><input type="number" min="1" step="1" className="sp-input w-full px-2.5 py-2 text-sm" value={weight} onChange={(e) => setWeight(e.target.value)} /></Field>
+      </div>
+      <Field label="Was lief schief? (optional, hilft dir beim nächsten Mal)">
+        <textarea className="sp-input w-full px-3 py-2.5 text-sm resize-none" rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="z.B. Textaufgaben zu Bruchrechnen falsch verstanden" />
+      </Field>
+      <button onClick={save} className="sp-btn-primary w-full py-2.5 text-sm">Ergebnis speichern</button>
     </div>
   );
 }
@@ -3162,6 +3386,11 @@ function ExamDetail({ exam, subjects, data, setData, onBack, onOpenSubject }) {
         </div>
       )}
 
+      <div className="sp-card p-5 mb-5">
+        <SectionTitle icon={Award} title="Ergebnis" />
+        <ExamResultSection exam={exam} subject={subject} setData={setData} />
+      </div>
+
       <div className="sp-card p-5">
         <SectionTitle icon={FileCheck2} title="Prüfungssimulation" />
         <ExamSimulation exam={exam} subject={subject} relevantEntries={relevant} settings={data.settings} simState={simState} onSaveSim={saveSim} />
@@ -3197,6 +3426,166 @@ function TODO_TYPE_META(type) {
   if (type === "homework") return { icon: ListTodo, color: "amber" };
   if (type === "examplan") return { icon: CalendarDays, color: "teal" };
   return { icon: BookOpen, color: "accent" };
+}
+
+function GradeModal({ open, onClose, onSave, defaultType }) {
+  const empty = { value: "2.0", type: defaultType || "schriftlich", weight: "1", title: "", date: todayISO() };
+  const [form, setForm] = useState(empty);
+  useEffect(() => { if (open) setForm({ ...empty, type: defaultType || "schriftlich" }); }, [open, defaultType]);
+  if (!open) return null;
+  const valid = Number(form.value) >= 1 && Number(form.value) <= 6;
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title="Note hinzufügen" onClose={onClose} />
+      <div className="px-5 pb-5">
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Note (1,0 - 6,0)">
+            <input type="number" step="0.1" min="1" max="6" className="sp-input w-full px-3 py-2.5 text-sm" value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} />
+          </Field>
+          <Field label="Art">
+            <select className="sp-input w-full px-3 py-2.5 text-sm" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+              {GRADE_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+            </select>
+          </Field>
+        </div>
+        <Field label="Bezeichnung (optional)">
+          <input className="sp-input w-full px-3 py-2.5 text-sm" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="z.B. Schulaufgabe Bruchrechnen" />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Gewichtung"><input type="number" min="1" step="1" className="sp-input w-full px-3 py-2.5 text-sm" value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} /></Field>
+          <Field label="Datum"><input type="date" className="sp-input w-full px-3 py-2.5 text-sm" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+        </div>
+        <p className="text-xs mb-3" style={{ color: "var(--text-faint)" }}>Gewichtung z.B. 2 für eine Schulaufgabe, 1 für eine normale Abfrage.</p>
+        <button
+          onClick={() => { onSave({ id: uid(), value: Number(form.value), type: form.type, weight: Number(form.weight) || 1, title: form.title, date: form.date, examId: null }); onClose(); }}
+          disabled={!valid}
+          className="sp-btn-primary w-full py-3 text-sm disabled:opacity-40"
+        >
+          Speichern
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function NeededGradeCalculator({ grades, weightSchriftlich }) {
+  const [target, setTarget] = useState("1.5");
+  const [category, setCategory] = useState("schriftlich");
+  const [weight, setWeight] = useState("1");
+
+  const targetNum = Number(target);
+  const result = (targetNum >= 1 && targetNum <= 6)
+    ? computeNeededGrade({ grades, weightSchriftlich, targetOverall: targetNum, newCategory: category, newWeight: Number(weight) || 1 })
+    : null;
+
+  return (
+    <div className="sp-card p-4" style={{ background: "var(--accent-soft)" }}>
+      <div className="flex items-center gap-2 mb-3">
+        <Target size={15} style={{ color: "var(--accent)" }} />
+        <p className="text-sm font-semibold" style={{ color: "var(--accent)" }}>Was brauche ich?</p>
+      </div>
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        <Field label="Zielschnitt"><input type="number" step="0.1" min="1" max="6" className="sp-input w-full px-2.5 py-2 text-sm" value={target} onChange={(e) => setTarget(e.target.value)} /></Field>
+        <Field label="Art">
+          <select className="sp-input w-full px-2.5 py-2 text-sm" value={category} onChange={(e) => setCategory(e.target.value)}>
+            {GRADE_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+          </select>
+        </Field>
+        <Field label="Gewicht"><input type="number" min="1" step="1" className="sp-input w-full px-2.5 py-2 text-sm" value={weight} onChange={(e) => setWeight(e.target.value)} /></Field>
+      </div>
+      {result?.note && <p className="text-sm" style={{ color: "var(--text-muted)" }}>{result.note}</p>}
+      {result && !result.note && (
+        result.neededValue <= 1 ? (
+          <p className="text-sm" style={{ color: "var(--rose)" }}>Selbst mit einer glatten <strong>1,0</strong> schaffst du diesen Zielschnitt in dieser Note kaum noch – knapp, aber sehr ambitioniert.</p>
+        ) : result.neededValue >= 6 ? (
+          <p className="text-sm" style={{ color: "var(--teal)" }}>Diesen Zielschnitt gefährdest du hier nicht mehr – selbst eine <strong>6,0</strong> würde ihn noch nicht reißen.</p>
+        ) : (
+          <p className="text-sm">Du brauchst mindestens eine <strong className="sp-font-display" style={{ color: "var(--accent)" }}>{result.neededValue.toFixed(1)}</strong> in dieser Note.</p>
+        )
+      )}
+    </div>
+  );
+}
+
+function SubjectGradeCard({ subject, grades, setData, defaultExpanded }) {
+  const [expanded, setExpanded] = useState(!!defaultExpanded);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalDefaultType, setModalDefaultType] = useState("schriftlich");
+  const stats = useMemo(() => computeSubjectGradeStats(grades, subject.weightSchriftlich), [grades, subject.weightSchriftlich]);
+
+  const addGrade = (grade) => setData((d) => ({ ...d, grades: { ...d.grades, [subject.id]: [...(d.grades[subject.id] || []), grade] } }));
+  const removeGrade = (id) => setData((d) => ({ ...d, grades: { ...d.grades, [subject.id]: (d.grades[subject.id] || []).filter((g) => g.id !== id) } }));
+  const setWeight = (pct) => setData((d) => ({ ...d, subjects: d.subjects.map((s) => s.id === subject.id ? { ...s, weightSchriftlich: pct } : s) }));
+  const openModal = (type) => { setModalDefaultType(type); setModalOpen(true); };
+
+  const overallColor = stats.overall === null ? "var(--text-faint)" : stats.overall <= 1.5 ? "var(--teal)" : stats.overall <= 2.5 ? "var(--accent)" : stats.overall <= 4 ? "var(--amber)" : "var(--rose)";
+
+  return (
+    <div className="sp-card p-4">
+      <button onClick={() => setExpanded((e) => !e)} className="w-full flex items-center gap-3 text-left">
+        <Avatar subject={subject} size={40} />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold">{subject.name}</p>
+          <p className="text-xs" style={{ color: "var(--text-muted)" }}>{stats.count} Note{stats.count === 1 ? "" : "n"}</p>
+        </div>
+        <p className="sp-font-display font-bold text-xl" style={{ color: overallColor }}>{stats.overall !== null ? stats.overall.toFixed(2) : "—"}</p>
+        {expanded ? <ChevronUp size={16} style={{ color: "var(--text-faint)" }} /> : <ChevronDown size={16} style={{ color: "var(--text-faint)" }} />}
+      </button>
+
+      {expanded && (
+        <div className="mt-4 sp-fade-in">
+          <div className="flex items-center gap-4 mb-4 text-xs" style={{ color: "var(--text-muted)" }}>
+            <span>Schriftlich: <strong>{stats.avgS !== null ? stats.avgS.toFixed(2) : "—"}</strong></span>
+            <span>Mündlich: <strong>{stats.avgM !== null ? stats.avgM.toFixed(2) : "—"}</strong></span>
+          </div>
+          <div className="mb-4">
+            <p className="text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>Gewichtung schriftlich / mündlich: {subject.weightSchriftlich}% / {100 - subject.weightSchriftlich}%</p>
+            <input type="range" min="0" max="100" step="10" value={subject.weightSchriftlich} onChange={(e) => setWeight(Number(e.target.value))} className="w-full" />
+          </div>
+
+          {grades.length > 0 && (
+            <div className="space-y-1.5 mb-4">
+              {[...grades].sort((a, b) => b.date.localeCompare(a.date)).map((g) => (
+                <div key={g.id} className="flex items-center gap-2.5 px-3 py-2 rounded-xl" style={{ background: "var(--bg-soft)" }}>
+                  <span className="sp-font-display font-bold text-sm w-8 shrink-0">{g.value.toFixed(1)}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs truncate">{g.title || (g.type === "schriftlich" ? "Schriftliche Note" : "Mündliche Note")}</p>
+                    <p className="text-[11px]" style={{ color: "var(--text-faint)" }}>{g.type === "schriftlich" ? "Schriftlich" : "Mündlich"} · Gewicht {g.weight} · {fmtDate(g.date)}</p>
+                  </div>
+                  <button onClick={() => removeGrade(g.id)}><Trash2 size={13} style={{ color: "var(--text-faint)" }} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-2 mb-4">
+            <button onClick={() => openModal("schriftlich")} className="sp-btn-secondary py-2.5 text-sm flex items-center justify-center gap-1.5"><Plus size={14} />Schriftlich</button>
+            <button onClick={() => openModal("muendlich")} className="sp-btn-secondary py-2.5 text-sm flex items-center justify-center gap-1.5"><Plus size={14} />Mündlich</button>
+          </div>
+
+          <NeededGradeCalculator grades={grades} weightSchriftlich={subject.weightSchriftlich} />
+        </div>
+      )}
+      <GradeModal open={modalOpen} onClose={() => setModalOpen(false)} onSave={addGrade} defaultType={modalDefaultType} />
+    </div>
+  );
+}
+
+function GradesPage({ data, setData, subjects }) {
+  return (
+    <div className="sp-fade-in max-w-3xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
+      <h1 className="sp-font-display font-bold text-2xl mb-5">Noten</h1>
+      {subjects.length === 0 ? (
+        <EmptyState icon={Award} title="Noch keine Fächer angelegt" />
+      ) : (
+        <div className="space-y-3">
+          {subjects.map((s) => (
+            <SubjectGradeCard key={s.id} subject={s} grades={data.grades[s.id] || []} setData={setData} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function TodoPage({ data, subjects, onStartTodo }) {
@@ -3372,7 +3761,7 @@ function DataBackupSection({ data, setData }) {
       exportedAt: new Date().toISOString(), app: "StudyPilot", version: 3,
       settings: data.settings, subjects: data.subjects, schedule: data.schedule,
       exams: data.exams, homework: data.homework, entries: data.entries, chats: data.chats || {},
-      examSims: data.examSims || {},
+      examSims: data.examSims || {}, grades: data.grades || {},
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -3397,7 +3786,7 @@ function DataBackupSection({ data, setData }) {
           homework: parsed.homework || [],
           entries: parsed.entries || [],
           chats: parsed.chats || {},
-          examSims: parsed.examSims || {},
+          examSims: parsed.examSims || {}, grades: parsed.grades || {},
         }));
         setStatus({ type: "ok", msg: "Backup erfolgreich importiert." });
       } catch (err) {
@@ -3566,6 +3955,7 @@ const NAV_ITEMS = [
   { key: "subjects", label: "Fächer", icon: BookOpen },
   { key: "exams", label: "Prüfungen", icon: ClipboardCheck },
   { key: "homework", label: "Hausaufgaben", icon: ListTodo },
+  { key: "grades", label: "Noten", icon: Award },
   { key: "settings", label: "Einstellungen", icon: SettingsIcon },
 ];
 const MOBILE_NAV = ["dashboard", "todo", "subjects", "exams", "settings"];
@@ -3729,6 +4119,7 @@ function sanitizeEntries(raw) {
     date: typeof e.date === "string" ? e.date : todayISO(),
     images: Array.isArray(e.images) ? e.images : (e.image ? [e.image] : []),
     image: e.image || (Array.isArray(e.images) ? e.images[0] : null) || null,
+    documents: Array.isArray(e.documents) ? e.documents.filter((d) => d && typeof d.dataUrl === "string").map((d) => ({ name: d.name || "Dokument.pdf", dataUrl: d.dataUrl })) : [],
     createdAt: typeof e.createdAt === "number" ? e.createdAt : Date.now(),
     ocrText: typeof e.ocrText === "string" ? e.ocrText : "",
     summary: typeof e.summary === "string" ? e.summary : "",
@@ -3757,6 +4148,9 @@ function sanitizeExams(raw) {
   return raw.filter((e) => e && e.subjectId && e.date).map((e) => ({
     id: e.id || uid(), subjectId: e.subjectId, type: EXAM_TYPES.includes(e.type) ? e.type : "Abfrage",
     date: e.date, title: e.title || "", description: e.description || "", stoffbeginn: e.stoffbeginn || "",
+    resultGrade: (typeof e.resultGrade === "number" && e.resultGrade >= 1 && e.resultGrade <= 6) ? e.resultGrade : null,
+    resultNote: typeof e.resultNote === "string" ? e.resultNote : "",
+    resultGradeId: e.resultGradeId || null,
   }));
 }
 function sanitizeHomework(raw) {
@@ -3771,6 +4165,7 @@ function sanitizeSubjects(raw) {
   return raw.filter((s) => s && s.id && s.name).map((s) => ({
     id: s.id, name: s.name, color: s.color || SUBJECT_PALETTE[0],
     quizFrequency: s.quizFrequency === "frequent" ? "frequent" : "occasional",
+    weightSchriftlich: (typeof s.weightSchriftlich === "number" && s.weightSchriftlich >= 0 && s.weightSchriftlich <= 100) ? s.weightSchriftlich : 50,
   }));
 }
 
@@ -3788,7 +4183,7 @@ class ErrorBoundary extends React.Component {
   }
   handleReset = async () => {
     try {
-      const keys = ["settings", "subjects", "schedule", "exams", "homework", "entries", "chats", "examSims"];
+      const keys = ["settings", "subjects", "schedule", "exams", "homework", "entries", "chats", "examSims", "grades"];
       for (const k of keys) {
         try { await window.storage.delete(k, false); } catch (e) { /* Key existierte evtl. nicht */ }
       }
@@ -3846,7 +4241,7 @@ function OnboardingWizard({ onComplete }) {
   };
 
   const buildSubjects = () => selectedSubjects.map((name, i) => ({
-    id: uid(), name, color: SUBJECT_PALETTE[i % SUBJECT_PALETTE.length], quizFrequency: "occasional",
+    id: uid(), name, color: SUBJECT_PALETTE[i % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 50,
   }));
 
   const finish = (startPage) => onComplete({ profile, subjects: buildSubjects(), schedule: [], startPage });
@@ -3956,7 +4351,7 @@ function OnboardingWizard({ onComplete }) {
 
 function StudyPilotAppInner() {
   const [loaded, setLoaded] = useState(false);
-  const [data, setData] = useState({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {}, examSims: {} });
+  const [data, setData] = useState({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {}, examSims: {}, grades: {} });
   const [page, setPage] = useState("dashboard");
   const [activeSubjectId, setActiveSubjectId] = useState(null);
   const [activeExamId, setActiveExamId] = useState(null);
@@ -3986,7 +4381,7 @@ function StudyPilotAppInner() {
       }
 
       try {
-        const keys = ["settings", "subjects", "schedule", "exams", "homework", "entries", "chats", "examSims"];
+        const keys = ["settings", "subjects", "schedule", "exams", "homework", "entries", "chats", "examSims", "grades"];
         const loadedData = {};
         for (const k of keys) {
           const r = await safeStorageGet(k);
@@ -4006,9 +4401,10 @@ function StudyPilotAppInner() {
           entries: sanitizeEntries(loadedData.entries),
           chats: (loadedData.chats && typeof loadedData.chats === "object" && !Array.isArray(loadedData.chats)) ? loadedData.chats : {},
           examSims: (loadedData.examSims && typeof loadedData.examSims === "object" && !Array.isArray(loadedData.examSims)) ? loadedData.examSims : {},
+          grades: (loadedData.grades && typeof loadedData.grades === "object" && !Array.isArray(loadedData.grades)) ? loadedData.grades : {},
         });
       } catch (e) {
-        setData({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {}, examSims: {} });
+        setData({ settings: DEFAULT_SETTINGS, subjects: [], schedule: [], exams: [], homework: [], entries: [], chats: {}, examSims: {}, grades: {} });
       } finally {
         setLoaded(true);
       }
@@ -4032,6 +4428,7 @@ function StudyPilotAppInner() {
   useEffect(() => { persistKey("entries", data.entries); }, [data.entries, loaded, persistKey]);
   useEffect(() => { persistKey("chats", data.chats); }, [data.chats, loaded, persistKey]);
   useEffect(() => { persistKey("examSims", data.examSims); }, [data.examSims, loaded, persistKey]);
+  useEffect(() => { persistKey("grades", data.grades); }, [data.grades, loaded, persistKey]);
 
   const subjects = data.subjects;
   const searchResults = useSearchResults(query, data, subjects);
@@ -4043,7 +4440,7 @@ function StudyPilotAppInner() {
   const goPage = (p) => { setPage(p); setMobileMenuOpen(false); window.scrollTo(0, 0); };
   const openUpload = (subjectId) => { setUploadDefaultSubject(subjectId || null); setUploadOpen(true); };
 
-  const addSubject = (name) => setData((d) => ({ ...d, subjects: [...d.subjects, { id: uid(), name, color: SUBJECT_PALETTE[d.subjects.length % SUBJECT_PALETTE.length], quizFrequency: "occasional" }] }));
+  const addSubject = (name) => setData((d) => ({ ...d, subjects: [...d.subjects, { id: uid(), name, color: SUBJECT_PALETTE[d.subjects.length % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 50 }] }));
   const saveEntry = (entry) => setData((d) => ({ ...d, entries: [...d.entries, entry] }));
 
   const navResult = (r) => {
@@ -4116,6 +4513,7 @@ function StudyPilotAppInner() {
             <ExamDetail key={activeExam.id} exam={activeExam} subjects={subjects} data={data} setData={setData} onBack={() => goPage("exams")} onOpenSubject={openSubject} />
           )}
           {page === "homework" && <HomeworkPage data={data} setData={setData} subjects={subjects} />}
+          {page === "grades" && <GradesPage data={data} setData={setData} subjects={subjects} />}
           {page === "settings" && <SettingsPage data={data} setData={setData} saveStatus={saveStatus} saveError={saveError} />}
         </div>
       </div>

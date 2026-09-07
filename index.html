@@ -66,6 +66,10 @@
     position: fixed; top: 10px; right: 92px; z-index: 9997; background: #5B57F2; border: none; color: #fff;
     border-radius: 999px; padding: 6px 12px; font-size: 11px; cursor: pointer; display: none;
   }
+  #push-fab {
+    position: fixed; top: 44px; right: 10px; z-index: 9997; background: #fff; border: 1px solid #E7E4DE;
+    border-radius: 999px; padding: 6px 12px; font-size: 11px; color: #0EA394; cursor: pointer; display: none;
+  }
 
   /* Zugriff-ausstehend-Screen (eingeloggt, aber noch kein gültiger Einladungscode eingelöst) */
   #pending-screen {
@@ -174,6 +178,7 @@
   <div id="boot-error"></div>
 </div>
 <button id="admin-fab">Admin</button>
+<button id="push-fab">🔔 Erinnerungen</button>
 <button id="logout-fab">Abmelden</button>
 <div id="root"></div>
 
@@ -186,6 +191,10 @@
   // =================================================================
   const SUPABASE_URL = "https://plxpvktnyptulghpikyx.supabase.co";
   const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBseHB2a3RueXB0dWxnaHBpa3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc0MDEyNzksImV4cCI6MjEwMjk3NzI3OX0.RqR96xYr7gAT4jkjH3_mGmFJM0gewv4qP4qotavIE5g";
+
+  // Optional: Push-Benachrichtigungen. Leer lassen, um dieses Feature auszublenden -
+  // siehe README "Push-Benachrichtigungen einrichten" für den öffentlichen VAPID-Key.
+  const VAPID_PUBLIC_KEY = "";
 
   window.STUDYPILOT_STANDALONE = true;
 
@@ -328,6 +337,48 @@
     fab.onclick = () => { overlay.classList.add("visible"); refreshList(); };
   }
 
+  function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const rawData = atob(base64);
+    return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
+  }
+
+  function setupPushNotifications(user) {
+    if (!VAPID_PUBLIC_KEY || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    const fab = document.getElementById("push-fab");
+    fab.style.display = "block";
+
+    async function refreshFabLabel() {
+      const reg = await navigator.serviceWorker.ready;
+      const existing = await reg.pushManager.getSubscription();
+      fab.textContent = existing ? "🔔 Erinnerungen an" : "🔔 Erinnerungen";
+    }
+    refreshFabLabel();
+
+    fab.onclick = async () => {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        let sub = await reg.pushManager.getSubscription();
+        if (sub) {
+          // Bereits aktiv -> deaktivieren
+          await sub.unsubscribe();
+          await supabase.from("push_subscriptions").delete().eq("user_id", user.id);
+          fab.textContent = "🔔 Erinnerungen";
+          return;
+        }
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") { alert("Ohne Berechtigung kann StudyPilot dir keine Erinnerungen schicken."); return; }
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+        const { error } = await supabase.from("push_subscriptions").upsert({ user_id: user.id, subscription: sub.toJSON(), updated_at: new Date().toISOString() });
+        if (error) throw error;
+        fab.textContent = "🔔 Erinnerungen an";
+      } catch (e) {
+        alert("Erinnerungen konnten nicht aktiviert werden: " + (e.message || e));
+      }
+    };
+  }
+
   async function onAuthenticated(user) {
     window.storage = makeSupabaseStorage(user.id);
 
@@ -370,6 +421,7 @@
     fab.style.display = "block";
     fab.onclick = async () => { await supabase.auth.signOut(); window.location.reload(); };
     if (profile.is_admin) setupAdminPanel(user);
+    setupPushNotifications(user);
     mountApp();
   }
 

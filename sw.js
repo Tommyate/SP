@@ -1,7 +1,7 @@
 // StudyPilot Service Worker
 // Cached wird nur die lokale App-Hülle (HTML/JS/Icons), NICHT die KI-Anfragen
 // oder die CDN-Bibliotheken – die brauchen ohnehin eine aktive Internetverbindung.
-const CACHE_NAME = "studypilot-shell-v2";
+const CACHE_NAME = "studypilot-shell-v3";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -44,6 +44,29 @@ self.addEventListener("fetch", (event) => {
         })
         .catch(() => cached);
       return cached || network;
+    })
+  );
+});
+
+// --- Push-Benachrichtigungen (nur relevant, wenn "Erinnerungen aktivieren" genutzt wurde) ---
+self.addEventListener("push", (event) => {
+  let payload = { title: "StudyPilot", body: "Es gibt etwas Neues für dich." };
+  try { if (event.data) payload = { ...payload, ...event.data.json() }; } catch (e) { /* Fallback-Text verwenden */ }
+  event.waitUntil(
+    self.registration.showNotification(payload.title || "StudyPilot", {
+      body: payload.body || "",
+      icon: "./icon-192.png",
+      badge: "./icon-192.png",
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) { if ("focus" in client) return client.focus(); }
+      return clients.openWindow("./");
     })
   );
 });
