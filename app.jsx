@@ -6,7 +6,8 @@ import {
   Zap, Menu, Calculator, Languages, Globe2, Landmark, Atom, Leaf, FlaskConical, Dumbbell,
   Palette, Music2, ImagePlus, Trash2, ArrowLeft, CheckCircle2, Circle, RotateCcw, Loader2,
   BrainCircuit, ScanText, Wand2, Tags, School, Pencil, Download, UploadCloud, FileJson, Bot, Send,
-  ChevronDown, ChevronUp, Play, ListChecks, FileCheck2, PenLine, Target, Award
+  ChevronDown, ChevronUp, Play, ListChecks, FileCheck2, PenLine, Target, Award,
+  Timer, Keyboard, Grid3x3, Repeat
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid, RadialBarChart, RadialBar, PolarAngleAxis } from "recharts";
 
@@ -190,6 +191,14 @@ function iconForSubject(name) {
   const key = (name || "").toLowerCase();
   for (const k in SUBJECT_ICONS) if (key.includes(k)) return SUBJECT_ICONS[k];
   return BookOpen;
+}
+
+// Sprachfächer werden anhand des Namens erkannt (gleiche Idee wie die Fach-Icon-Zuordnung),
+// damit die Vokabeln-Seite ohne manuelle Konfiguration automatisch die richtigen Fächer findet.
+const LANGUAGE_KEYS = ["englisch", "franz", "spanisch", "latein", "italienisch", "russisch"];
+function isLanguageSubject(name) {
+  const key = (name || "").toLowerCase();
+  return LANGUAGE_KEYS.some((k) => key.includes(k));
 }
 
 const EXAM_TYPES = ["Abfrage", "Ex", "Schulaufgabe", "Referat"];
@@ -2393,6 +2402,318 @@ function FreitextQuiz({ allTerms, subject, settings, onExit }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Vokabel-Spiele (Fach-unabhängig, mit Richtungs-Umschalter)          */
+/* ------------------------------------------------------------------ */
+function sideOf(term, direction, side) {
+  // side: "prompt" | "answer" - liefert je nach Lernrichtung Vokabel oder Übersetzung
+  const isPromptTerm = direction === "forward";
+  if (side === "prompt") return isPromptTerm ? term.term : term.def;
+  return isPromptTerm ? term.def : term.term;
+}
+
+function VocabMCGame({ terms, direction, onExit }) {
+  const questions = useMemo(() => {
+    const pool = shuffleArr(terms);
+    return pool.map((t) => {
+      const correct = sideOf(t, direction, "answer");
+      const distractors = shuffleArr(pool.filter((o) => o !== t)).slice(0, 3).map((o) => sideOf(o, direction, "answer"));
+      return { prompt: sideOf(t, direction, "prompt"), correct, options: shuffleArr([correct, ...distractors]) };
+    });
+  }, [terms, direction]);
+
+  const [index, setIndex] = useState(0);
+  const [selected, setSelected] = useState(null);
+  const [score, setScore] = useState(0);
+  const [done, setDone] = useState(false);
+  const q = questions[index];
+
+  const choose = (opt) => {
+    if (selected) return;
+    setSelected(opt);
+    if (opt === q.correct) setScore((s) => s + 1);
+  };
+  const next = () => {
+    setSelected(null);
+    if (index + 1 < questions.length) setIndex(index + 1); else setDone(true);
+  };
+
+  if (done) {
+    return (
+      <div className="sp-card p-8 text-center sp-pop-in max-w-md mx-auto">
+        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: "var(--accent-soft)" }}><BrainCircuit size={26} style={{ color: "var(--accent)" }} /></div>
+        <p className="sp-font-display font-semibold text-lg mb-1">{score} / {questions.length} richtig</p>
+        <button onClick={onExit} className="sp-btn-primary px-5 py-2.5 text-sm mt-4">Zurück</button>
+      </div>
+    );
+  }
+  if (!q) return <EmptyState icon={BrainCircuit} title="Mindestens 4 Vokabeln nötig" />;
+
+  return (
+    <div className="max-w-md mx-auto">
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={onExit} className="text-sm flex items-center gap-1 sp-nav-item px-2 py-1 rounded-lg -ml-2" style={{ color: "var(--text-muted)" }}><ArrowLeft size={14} />Beenden</button>
+        <span className="text-xs" style={{ color: "var(--text-faint)" }}>{index + 1} / {questions.length}</span>
+      </div>
+      <div className="sp-card p-5 mb-4"><p className="sp-font-display font-semibold text-lg text-center">{q.prompt}</p></div>
+      <div className="space-y-2">
+        {q.options.map((opt, i) => {
+          let style = { borderColor: "var(--border)" };
+          if (selected) {
+            if (opt === q.correct) style = { borderColor: "var(--teal)", background: "var(--teal-soft)" };
+            else if (opt === selected) style = { borderColor: "var(--rose)", background: "var(--rose-soft)" };
+          }
+          return <button key={i} onClick={() => choose(opt)} className="sp-card w-full text-left p-3.5 text-sm" style={{ ...style, borderWidth: 2 }}>{opt}</button>;
+        })}
+      </div>
+      {selected && <button onClick={next} className="sp-btn-primary w-full py-3 text-sm mt-4">{index + 1 < questions.length ? "Weiter" : "Ergebnis anzeigen"}</button>}
+    </div>
+  );
+}
+
+function MatchingGame({ terms, direction, onExit }) {
+  const PAIR_COUNT = Math.min(6, terms.length);
+  const [round, setRound] = useState(0);
+  const pairs = useMemo(() => shuffleArr(terms).slice(0, PAIR_COUNT), [terms, round]);
+  const left = useMemo(() => shuffleArr(pairs.map((t, i) => ({ id: `l${i}`, pairId: i, value: sideOf(t, direction, "prompt") }))), [pairs]);
+  const right = useMemo(() => shuffleArr(pairs.map((t, i) => ({ id: `r${i}`, pairId: i, value: sideOf(t, direction, "answer") }))), [pairs]);
+
+  const [selectedLeft, setSelectedLeft] = useState(null);
+  const [matched, setMatched] = useState(new Set());
+  const [wrongFlash, setWrongFlash] = useState(null);
+  const [moves, setMoves] = useState(0);
+
+  const pickLeft = (item) => { if (matched.has(item.pairId)) return; setSelectedLeft(item); };
+  const pickRight = (item) => {
+    if (matched.has(item.pairId) || !selectedLeft) return;
+    setMoves((m) => m + 1);
+    if (selectedLeft.pairId === item.pairId) {
+      setMatched((prev) => new Set([...prev, item.pairId]));
+      setSelectedLeft(null);
+    } else {
+      setWrongFlash(item.id);
+      setTimeout(() => setWrongFlash(null), 400);
+      setSelectedLeft(null);
+    }
+  };
+
+  const finished = matched.size === PAIR_COUNT && PAIR_COUNT > 0;
+
+  if (PAIR_COUNT < 3) return <EmptyState icon={Grid3x3} title="Mindestens 3 Vokabeln nötig" />;
+
+  if (finished) {
+    return (
+      <div className="sp-card p-8 text-center sp-pop-in max-w-md mx-auto">
+        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: "var(--teal-soft)" }}><CheckCircle2 size={26} style={{ color: "var(--teal)" }} /></div>
+        <p className="sp-font-display font-semibold text-lg mb-1">Alle {PAIR_COUNT} Paare gefunden!</p>
+        <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>{moves} Versuche gebraucht</p>
+        <div className="flex gap-2 justify-center">
+          <button onClick={() => { setRound((r) => r + 1); setMatched(new Set()); setMoves(0); }} className="sp-btn-secondary px-4 py-2.5 text-sm flex items-center gap-1.5"><RotateCcw size={14} />Neue Runde</button>
+          <button onClick={onExit} className="sp-btn-primary px-4 py-2.5 text-sm">Zurück</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-lg mx-auto">
+      <div className="flex items-center justify-between mb-4">
+        <button onClick={onExit} className="text-sm flex items-center gap-1 sp-nav-item px-2 py-1 rounded-lg -ml-2" style={{ color: "var(--text-muted)" }}><ArrowLeft size={14} />Beenden</button>
+        <span className="text-xs" style={{ color: "var(--text-faint)" }}>{matched.size} / {PAIR_COUNT} · {moves} Versuche</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
+          {left.map((item) => (
+            <button
+              key={item.id}
+              disabled={matched.has(item.pairId)}
+              onClick={() => pickLeft(item)}
+              className="sp-card w-full p-3 text-sm text-left"
+              style={{
+                opacity: matched.has(item.pairId) ? 0.35 : 1,
+                borderWidth: 2,
+                borderColor: selectedLeft?.id === item.id ? "var(--accent)" : "var(--border)",
+                background: selectedLeft?.id === item.id ? "var(--accent-soft)" : "var(--bg-elevated)",
+              }}
+            >
+              {item.value}
+            </button>
+          ))}
+        </div>
+        <div className="space-y-2">
+          {right.map((item) => (
+            <button
+              key={item.id}
+              disabled={matched.has(item.pairId)}
+              onClick={() => pickRight(item)}
+              className="sp-card w-full p-3 text-sm text-left"
+              style={{
+                opacity: matched.has(item.pairId) ? 0.35 : 1,
+                borderWidth: 2,
+                borderColor: wrongFlash === item.id ? "var(--rose)" : "var(--border)",
+                background: wrongFlash === item.id ? "var(--rose-soft)" : "var(--bg-elevated)",
+              }}
+            >
+              {item.value}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function normalizeAnswer(str) {
+  return (str || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function TypingGame({ terms, direction, onExit }) {
+  const queue = useMemo(() => shuffleArr(terms), [terms]);
+  const [index, setIndex] = useState(0);
+  const [input, setInput] = useState("");
+  const [checked, setChecked] = useState(null); // null | true | false
+  const [mistakes, setMistakes] = useState([]);
+  const [score, setScore] = useState(0);
+  const [done, setDone] = useState(false);
+  const current = queue[index];
+
+  const check = () => {
+    if (checked !== null) { next(); return; }
+    const correctAnswer = sideOf(current, direction, "answer");
+    const isCorrect = normalizeAnswer(input) === normalizeAnswer(correctAnswer);
+    setChecked(isCorrect);
+    if (isCorrect) setScore((s) => s + 1);
+    else setMistakes((m) => [...m, { prompt: sideOf(current, direction, "prompt"), given: input, correct: correctAnswer }]);
+  };
+  const next = () => {
+    setInput(""); setChecked(null);
+    if (index + 1 < queue.length) setIndex(index + 1); else setDone(true);
+  };
+
+  if (queue.length === 0) return <EmptyState icon={Keyboard} title="Keine Vokabeln verfügbar" />;
+
+  if (done) {
+    return (
+      <div className="max-w-md mx-auto">
+        <div className="sp-card p-6 text-center sp-pop-in mb-4">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: "var(--accent-soft)" }}><Keyboard size={26} style={{ color: "var(--accent)" }} /></div>
+          <p className="sp-font-display font-semibold text-lg">{score} / {queue.length} richtig</p>
+        </div>
+        {mistakes.length > 0 && (
+          <div className="space-y-2 mb-4">
+            {mistakes.map((m, i) => (
+              <div key={i} className="sp-card p-3 text-sm">
+                <p style={{ color: "var(--text-muted)" }}>{m.prompt}</p>
+                <p>Deine Antwort: <span style={{ color: "var(--rose)" }}>{m.given || "(leer)"}</span> · Richtig: <span style={{ color: "var(--teal)" }}>{m.correct}</span></p>
+              </div>
+            ))}
+          </div>
+        )}
+        <button onClick={onExit} className="sp-btn-primary w-full py-3 text-sm">Zurück</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-md mx-auto">
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={onExit} className="text-sm flex items-center gap-1 sp-nav-item px-2 py-1 rounded-lg -ml-2" style={{ color: "var(--text-muted)" }}><ArrowLeft size={14} />Beenden</button>
+        <span className="text-xs" style={{ color: "var(--text-faint)" }}>{index + 1} / {queue.length}</span>
+      </div>
+      <div className="sp-card p-5 mb-4 text-center">
+        <p className="text-xs mb-1.5" style={{ color: "var(--text-faint)" }}>Übersetze:</p>
+        <p className="sp-font-display font-semibold text-lg">{sideOf(current, direction, "prompt")}</p>
+      </div>
+      <input
+        autoFocus
+        className="sp-input w-full px-3.5 py-3 text-sm mb-3"
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && check()}
+        disabled={checked !== null}
+        style={checked === true ? { borderColor: "var(--teal)" } : checked === false ? { borderColor: "var(--rose)" } : {}}
+      />
+      {checked === false && <p className="text-sm mb-3" style={{ color: "var(--rose)" }}>Richtig wäre: {sideOf(current, direction, "answer")}</p>}
+      <button onClick={check} className="sp-btn-primary w-full py-3 text-sm">{checked === null ? "Prüfen" : index + 1 < queue.length ? "Weiter" : "Ergebnis anzeigen"}</button>
+    </div>
+  );
+}
+
+function SpeedRound({ terms, direction, onExit }) {
+  const DURATION = 60;
+  const [started, setStarted] = useState(false);
+  const [timeLeft, setTimeLeft] = useState(DURATION);
+  const [score, setScore] = useState(0);
+  const [wrong, setWrong] = useState(0);
+  const [current, setCurrent] = useState(null);
+  const poolRef = useRef([]);
+
+  const nextQuestion = () => {
+    if (poolRef.current.length === 0) poolRef.current = shuffleArr(terms);
+    const t = poolRef.current.pop();
+    const correct = sideOf(t, direction, "answer");
+    const distractors = shuffleArr(terms.filter((o) => o !== t)).slice(0, 3).map((o) => sideOf(o, direction, "answer"));
+    setCurrent({ prompt: sideOf(t, direction, "prompt"), correct, options: shuffleArr([correct, ...distractors]) });
+  };
+
+  const start = () => { setScore(0); setWrong(0); setTimeLeft(DURATION); poolRef.current = shuffleArr(terms); nextQuestion(); setStarted(true); };
+
+  useEffect(() => {
+    if (!started || timeLeft <= 0) return;
+    const t = setTimeout(() => setTimeLeft((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [started, timeLeft]);
+
+  const choose = (opt) => {
+    if (opt === current.correct) setScore((s) => s + 1); else setWrong((w) => w + 1);
+    nextQuestion();
+  };
+
+  if (terms.length < 4) return <EmptyState icon={Timer} title="Mindestens 4 Vokabeln nötig" />;
+
+  if (!started) {
+    return (
+      <div className="sp-card p-8 text-center max-w-md mx-auto">
+        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: "var(--amber-soft)" }}><Timer size={26} style={{ color: "var(--amber)" }} /></div>
+        <p className="sp-font-display font-semibold text-lg mb-1">Speedrunde – 60 Sekunden</p>
+        <p className="text-sm mb-5" style={{ color: "var(--text-muted)" }}>So viele Vokabeln wie möglich richtig zuordnen.</p>
+        <button onClick={start} className="sp-btn-primary px-6 py-3 text-sm flex items-center gap-2 mx-auto"><Play size={15} />Start</button>
+      </div>
+    );
+  }
+
+  if (timeLeft <= 0) {
+    return (
+      <div className="sp-card p-8 text-center max-w-md mx-auto sp-pop-in">
+        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4" style={{ background: "var(--teal-soft)" }}><Award size={26} style={{ color: "var(--teal)" }} /></div>
+        <p className="sp-font-display font-bold text-2xl mb-1">{score} richtig</p>
+        <p className="text-sm mb-5" style={{ color: "var(--text-muted)" }}>{wrong} falsch</p>
+        <div className="flex gap-2 justify-center">
+          <button onClick={start} className="sp-btn-secondary px-4 py-2.5 text-sm flex items-center gap-1.5"><RotateCcw size={14} />Nochmal</button>
+          <button onClick={onExit} className="sp-btn-primary px-4 py-2.5 text-sm">Zurück</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-md mx-auto">
+      <div className="flex items-center justify-between mb-3">
+        <Chip color={timeLeft <= 10 ? "rose" : "amber"}><Timer size={12} />{timeLeft}s</Chip>
+        <span className="text-xs" style={{ color: "var(--text-faint)" }}>{score} richtig · {wrong} falsch</span>
+      </div>
+      {current && (
+        <>
+          <div className="sp-card p-5 mb-4"><p className="sp-font-display font-semibold text-lg text-center">{current.prompt}</p></div>
+          <div className="space-y-2">
+            {current.options.map((opt, i) => <button key={i} onClick={() => choose(opt)} className="sp-card w-full text-left p-3.5 text-sm" style={{ borderWidth: 2, borderColor: "var(--border)" }}>{opt}</button>)}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function EntryEditModal({ open, onClose, entry, subjects, onSave, onDelete }) {
   const toLines = (arr) => (arr || []).join("\n");
   const toTermLines = (arr) => (arr || []).map((t) => `${t.term}: ${t.def}`).join("\n");
@@ -3571,6 +3892,126 @@ function SubjectGradeCard({ subject, grades, setData, defaultExpanded }) {
   );
 }
 
+const VOCAB_GAMES = [
+  { key: "cards", label: "Karteikarten", icon: Layers },
+  { key: "mc", label: "Multiple Choice", icon: BrainCircuit },
+  { key: "match", label: "Zuordnungsspiel", icon: Grid3x3 },
+  { key: "type", label: "Tippen", icon: Keyboard },
+  { key: "speed", label: "Speedrunde", icon: Timer },
+  { key: "learn", label: "Lernmodus (SRS)", icon: Flame },
+];
+
+function VocabPage({ data, setData, subjects }) {
+  const languageSubjects = useMemo(() => subjects.filter((s) => isLanguageSubject(s.name)), [subjects]);
+  const [activeLangId, setActiveLangId] = useState(languageSubjects[0]?.id || null);
+  const [scope, setScope] = useState("all"); // all | recent
+  const [direction, setDirection] = useState("forward"); // forward = Vokabel->Übersetzung
+  const [game, setGame] = useState(null);
+
+  useEffect(() => {
+    if (!languageSubjects.find((s) => s.id === activeLangId)) setActiveLangId(languageSubjects[0]?.id || null);
+  }, [languageSubjects]);
+
+  const activeSubject = languageSubjects.find((s) => s.id === activeLangId) || languageSubjects[0] || null;
+  const entries = useMemo(
+    () => activeSubject ? data.entries.filter((e) => e.subjectId === activeSubject.id).sort((a, b) => b.date.localeCompare(a.date)) : [],
+    [data.entries, activeSubject]
+  );
+  const scopedEntries = scope === "recent" ? entries.slice(0, 5) : entries;
+  const terms = useMemo(() => scopedEntries.flatMap((e) => e.terms || []).filter((t) => t.term && t.def), [scopedEntries]);
+
+  const updateTermSrs = (entryId, termId, patch) => setData((d) => ({
+    ...d, entries: d.entries.map((e) => e.id !== entryId ? e : { ...e, terms: e.terms.map((t) => t.id === termId ? { ...t, ...patch } : t) }),
+  }));
+
+  const exitGame = () => setGame(null);
+
+  if (languageSubjects.length === 0 || !activeSubject) {
+    return (
+      <div className="sp-fade-in max-w-3xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
+        <h1 className="sp-font-display font-bold text-2xl mb-5">Vokabeln</h1>
+        <EmptyState icon={Languages} title="Noch kein Sprachfach angelegt" subtitle="Lege ein Fach wie Englisch, Latein, Französisch oder Spanisch an – StudyPilot erkennt Sprachfächer automatisch am Namen und zeigt hier passende Vokabel-Spiele." />
+      </div>
+    );
+  }
+
+  return (
+    <div className="sp-fade-in max-w-3xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
+      <h1 className="sp-font-display font-bold text-2xl mb-5">Vokabeln</h1>
+
+      <div className="flex gap-2 mb-4 overflow-x-auto sp-scroll pb-1">
+        {languageSubjects.map((s) => (
+          <button
+            key={s.id}
+            onClick={() => { setActiveLangId(s.id); setGame(null); }}
+            className="px-4 py-2 rounded-full text-sm font-medium shrink-0 transition-all"
+            style={{ background: activeSubject.id === s.id ? "var(--accent)" : "var(--bg-soft)", color: activeSubject.id === s.id ? "#fff" : "var(--text-muted)" }}
+          >
+            {s.name}
+          </button>
+        ))}
+      </div>
+
+      {!game && (
+        <>
+          <div className="sp-card p-3.5 mb-4 flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Umfang:</span>
+              <div className="sp-btn-secondary p-1 flex text-xs" style={{ borderRadius: 999 }}>
+                {[{ key: "all", label: "Alle" }, { key: "recent", label: "Neueste" }].map((o) => (
+                  <button key={o.key} onClick={() => setScope(o.key)} className="px-3 py-1.5 rounded-full transition-all" style={{ background: scope === o.key ? "var(--accent)" : "transparent", color: scope === o.key ? "#fff" : "var(--text-muted)" }}>{o.label}</button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Richtung:</span>
+              <button onClick={() => setDirection((d) => d === "forward" ? "reverse" : "forward")} className="sp-btn-secondary px-3 py-1.5 text-xs flex items-center gap-1.5">
+                <Repeat size={12} />{direction === "forward" ? "Vokabel → Übersetzung" : "Übersetzung → Vokabel"}
+              </button>
+            </div>
+          </div>
+          <p className="text-xs mb-4" style={{ color: "var(--text-faint)" }}>{terms.length} Vokabel{terms.length === 1 ? "" : "n"} verfügbar</p>
+
+          {terms.length === 0 ? (
+            <EmptyState icon={Languages} title="Noch keine Vokabeln erfasst" subtitle="Lade Hefteinträge oder Vokabellisten für dieses Fach hoch, damit StudyPilot Begriffe erkennt." />
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {VOCAB_GAMES.map((g) => {
+                const Icon = g.icon;
+                const disabled = (g.key === "match" && terms.length < 3) || ((g.key === "mc" || g.key === "speed") && terms.length < 4);
+                return (
+                  <button key={g.key} disabled={disabled} onClick={() => setGame(g.key)} className="sp-card sp-card-hover p-4 flex flex-col items-center gap-2 text-center disabled:opacity-40">
+                    <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "var(--accent-soft)" }}><Icon size={19} style={{ color: "var(--accent)" }} /></div>
+                    <p className="text-sm font-medium">{g.label}</p>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {game === "cards" && (
+        <div>
+          <button onClick={exitGame} className="text-sm flex items-center gap-1 sp-nav-item px-2 py-1 rounded-lg -ml-2 mb-3" style={{ color: "var(--text-muted)" }}><ArrowLeft size={14} />Beenden</button>
+          <div className="grid sm:grid-cols-3 gap-4">
+            {terms.map((t, i) => <Flashcard key={i} term={sideOf(t, direction, "prompt")} def={sideOf(t, direction, "answer")} />)}
+          </div>
+        </div>
+      )}
+      {game === "mc" && <VocabMCGame terms={terms} direction={direction} onExit={exitGame} />}
+      {game === "match" && <MatchingGame terms={terms} direction={direction} onExit={exitGame} />}
+      {game === "type" && <TypingGame terms={terms} direction={direction} onExit={exitGame} />}
+      {game === "speed" && <SpeedRound terms={terms} direction={direction} onExit={exitGame} />}
+      {game === "learn" && (
+        <div>
+          <LearnSession subjectId={activeSubject.id} entries={scopedEntries} onUpdateTerm={updateTermSrs} onExit={exitGame} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GradesPage({ data, setData, subjects }) {
   return (
     <div className="sp-fade-in max-w-3xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
@@ -3953,6 +4394,7 @@ const NAV_ITEMS = [
   { key: "todo", label: "To-Do", icon: ListChecks },
   { key: "schedule", label: "Stundenplan", icon: CalendarDays },
   { key: "subjects", label: "Fächer", icon: BookOpen },
+  { key: "vocab", label: "Vokabeln", icon: Languages },
   { key: "exams", label: "Prüfungen", icon: ClipboardCheck },
   { key: "homework", label: "Hausaufgaben", icon: ListTodo },
   { key: "grades", label: "Noten", icon: Award },
@@ -4513,6 +4955,7 @@ function StudyPilotAppInner() {
             <ExamDetail key={activeExam.id} exam={activeExam} subjects={subjects} data={data} setData={setData} onBack={() => goPage("exams")} onOpenSubject={openSubject} />
           )}
           {page === "homework" && <HomeworkPage data={data} setData={setData} subjects={subjects} />}
+          {page === "vocab" && <VocabPage data={data} setData={setData} subjects={subjects} />}
           {page === "grades" && <GradesPage data={data} setData={setData} subjects={subjects} />}
           {page === "settings" && <SettingsPage data={data} setData={setData} saveStatus={saveStatus} saveError={saveError} />}
         </div>
