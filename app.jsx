@@ -636,20 +636,34 @@ async function callClaudeVision(images, documents, subjectNames) {
     }),
     { type: "text", text: prompt },
   ];
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      messages: [{ role: "user", content }],
-    }),
-  });
-  if (!response.ok) throw new Error(`Claude-Anfrage fehlgeschlagen (${response.status})`);
-  const data = await response.json();
-  const textBlock = (data.content || []).find((b) => b.type === "text");
-  if (!textBlock) throw new Error("Keine Textantwort von Claude erhalten");
-  return parseAIJson(textBlock.text);
+
+  const attempt = async () => {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        messages: [{ role: "user", content }],
+      }),
+    });
+    if (!response.ok) throw new Error(`Claude-Anfrage fehlgeschlagen (${response.status})`);
+    const data = await response.json();
+    const textBlock = (data.content || []).find((b) => b.type === "text");
+    if (!textBlock) throw new Error("Keine Textantwort von Claude erhalten");
+    return parseAIJson(textBlock.text); // wirft bei ungültigem JSON
+  };
+
+  // Ungültiges/kaputtes JSON ist meist ein einmaliger Ausrutscher der KI, kein dauerhaftes
+  // Problem - daher hier gezielt (nur bei JSON-Fehlern, nicht bei HTTP-Fehlern) einmal erneut versuchen,
+  // bevor der Fehler nach oben durchgereicht wird und die App auf den Offline-Platzhalter zurückfällt.
+  try {
+    return await attempt();
+  } catch (e) {
+    if (!/JSON|Unexpected token|gültige JSON-Antwort/i.test(e.message || "")) throw e;
+    await sleep(500);
+    return await attempt();
+  }
 }
 
 async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -700,7 +714,15 @@ async function callOpenRouterVision(apiKey, model, images, subjectNames) {
     const data = await response.json();
     const text = data?.choices?.[0]?.message?.content;
     if (!text) throw new Error("Keine Textantwort von OpenRouter erhalten");
-    return parseAIJson(text);
+    try {
+      return parseAIJson(text);
+    } catch (parseErr) {
+      // Ungültiges JSON ist meist ein einmaliger Ausrutscher der KI - wie bei 429 erneut versuchen,
+      // statt sofort auf den Offline-Platzhalter zurückzufallen.
+      lastError = parseErr;
+      await sleep(400 * (attempt + 1));
+      continue;
+    }
   }
   throw lastError || new Error("OpenRouter-Anfrage fehlgeschlagen");
 }
@@ -1111,7 +1133,7 @@ function seedSubjects() {
   return names.map((n, i) => ({
     id: uid(), name: n, color: SUBJECT_PALETTE[i % SUBJECT_PALETTE.length],
     quizFrequency: frequentByDefault.has(n) ? "frequent" : "occasional",
-    weightSchriftlich: 50,
+    weightSchriftlich: 66.67,
   }));
 }
 function seedSchedule(subjects) {
@@ -1667,7 +1689,7 @@ function SchedulePage({ data, setData, subjects }) {
       const findOrCreate = (name) => {
         const match = subjectsNext.find((s) => s.name.toLowerCase() === (name || "").toLowerCase());
         if (match) return match.id;
-        const created = { id: uid(), name: (name || "Unbekannt").trim(), color: SUBJECT_PALETTE[subjectsNext.length % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 50 };
+        const created = { id: uid(), name: (name || "Unbekannt").trim(), color: SUBJECT_PALETTE[subjectsNext.length % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 66.67 };
         subjectsNext = [...subjectsNext, created];
         return created.id;
       };
@@ -2646,6 +2668,7 @@ function SpeedRound({ terms, direction, onExit }) {
   const [score, setScore] = useState(0);
   const [wrong, setWrong] = useState(0);
   const [current, setCurrent] = useState(null);
+  const [feedback, setFeedback] = useState(null); // { chosen, correct } | null - kurzer Flash vor der nächsten Frage
   const poolRef = useRef([]);
 
   const nextQuestion = () => {
@@ -2656,7 +2679,7 @@ function SpeedRound({ terms, direction, onExit }) {
     setCurrent({ prompt: sideOf(t, direction, "prompt"), correct, options: shuffleArr([correct, ...distractors]) });
   };
 
-  const start = () => { setScore(0); setWrong(0); setTimeLeft(DURATION); poolRef.current = shuffleArr(terms); nextQuestion(); setStarted(true); };
+  const start = () => { setScore(0); setWrong(0); setTimeLeft(DURATION); setFeedback(null); poolRef.current = shuffleArr(terms); nextQuestion(); setStarted(true); };
 
   useEffect(() => {
     if (!started || timeLeft <= 0) return;
@@ -2665,8 +2688,11 @@ function SpeedRound({ terms, direction, onExit }) {
   }, [started, timeLeft]);
 
   const choose = (opt) => {
-    if (opt === current.correct) setScore((s) => s + 1); else setWrong((w) => w + 1);
-    nextQuestion();
+    if (feedback) return; // Klicks während des kurzen Feedback-Flashs ignorieren
+    const isCorrect = opt === current.correct;
+    if (isCorrect) setScore((s) => s + 1); else setWrong((w) => w + 1);
+    setFeedback({ chosen: opt, correct: current.correct });
+    setTimeout(() => { setFeedback(null); nextQuestion(); }, 450);
   };
 
   if (terms.length < 4) return <EmptyState icon={Timer} title="Mindestens 4 Vokabeln nötig" />;
@@ -2706,7 +2732,14 @@ function SpeedRound({ terms, direction, onExit }) {
         <>
           <div className="sp-card p-5 mb-4"><p className="sp-font-display font-semibold text-lg text-center">{current.prompt}</p></div>
           <div className="space-y-2">
-            {current.options.map((opt, i) => <button key={i} onClick={() => choose(opt)} className="sp-card w-full text-left p-3.5 text-sm" style={{ borderWidth: 2, borderColor: "var(--border)" }}>{opt}</button>)}
+            {current.options.map((opt, i) => {
+              let style = { borderColor: "var(--border)" };
+              if (feedback) {
+                if (opt === feedback.correct) style = { borderColor: "var(--teal)", background: "var(--teal-soft)" };
+                else if (opt === feedback.chosen) style = { borderColor: "var(--rose)", background: "var(--rose-soft)" };
+              }
+              return <button key={i} onClick={() => choose(opt)} className="sp-card w-full text-left p-3.5 text-sm" style={{ ...style, borderWidth: 2 }}>{opt}</button>;
+            })}
           </div>
         </>
       )}
@@ -3140,7 +3173,7 @@ function SubjectDetail({ subject, data, setData, onBack, onUpload }) {
                   <div className="relative shrink-0">
                     {imgs[0] ? <img src={imgs[0]} className="w-20 h-20 rounded-xl object-cover" style={{ border: "1px solid var(--border)" }} /> : (
                       <div className="w-20 h-20 rounded-xl flex items-center justify-center" style={{ background: "var(--bg-soft)" }}>
-                        {hasDocs && <FileJson size={22} style={{ color: "var(--text-faint)" }} />}
+                        {hasDocs ? <FileJson size={22} style={{ color: "var(--text-faint)" }} /> : e.manualVocab ? <Languages size={22} style={{ color: "var(--text-faint)" }} /> : null}
                       </div>
                     )}
                     {imgs.length > 1 && <span className="absolute -bottom-1.5 -right-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: "var(--accent)", color: "#fff" }}>+{imgs.length - 1}</span>}
@@ -3860,8 +3893,18 @@ function SubjectGradeCard({ subject, grades, setData, defaultExpanded }) {
             <span>Mündlich: <strong>{stats.avgM !== null ? stats.avgM.toFixed(2) : "—"}</strong></span>
           </div>
           <div className="mb-4">
-            <p className="text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>Gewichtung schriftlich / mündlich: {subject.weightSchriftlich}% / {100 - subject.weightSchriftlich}%</p>
-            <input type="range" min="0" max="100" step="10" value={subject.weightSchriftlich} onChange={(e) => setWeight(Number(e.target.value))} className="w-full" />
+            <p className="text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>Gewichtung schriftlich / mündlich: {Math.round(subject.weightSchriftlich)}% / {Math.round(100 - subject.weightSchriftlich)}%</p>
+            <input type="range" min="0" max="100" step="1" value={subject.weightSchriftlich} onChange={(e) => setWeight(Number(e.target.value))} className="w-full mb-2" />
+            <div className="flex gap-1.5">
+              {[{ label: "1:1", pct: 50 }, { label: "2:1 schriftlich", pct: 66.67 }, { label: "3:1 schriftlich", pct: 75 }].map((preset) => (
+                <button key={preset.label} onClick={() => setWeight(preset.pct)} className="sp-btn-secondary px-2.5 py-1 text-[11px]">{preset.label}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 mb-4">
+            <button onClick={() => openModal("schriftlich")} className="sp-btn-secondary py-2.5 text-sm flex items-center justify-center gap-1.5"><Plus size={14} />Schriftlich</button>
+            <button onClick={() => openModal("muendlich")} className="sp-btn-secondary py-2.5 text-sm flex items-center justify-center gap-1.5"><Plus size={14} />Mündlich</button>
           </div>
 
           {grades.length > 0 && (
@@ -3878,11 +3921,6 @@ function SubjectGradeCard({ subject, grades, setData, defaultExpanded }) {
               ))}
             </div>
           )}
-
-          <div className="grid grid-cols-2 gap-2 mb-4">
-            <button onClick={() => openModal("schriftlich")} className="sp-btn-secondary py-2.5 text-sm flex items-center justify-center gap-1.5"><Plus size={14} />Schriftlich</button>
-            <button onClick={() => openModal("muendlich")} className="sp-btn-secondary py-2.5 text-sm flex items-center justify-center gap-1.5"><Plus size={14} />Mündlich</button>
-          </div>
 
           <NeededGradeCalculator grades={grades} weightSchriftlich={subject.weightSchriftlich} />
         </div>
@@ -3901,12 +3939,31 @@ const VOCAB_GAMES = [
   { key: "learn", label: "Lernmodus (SRS)", icon: Flame },
 ];
 
+function AddVocabModal({ open, onClose, onSave, subjectName }) {
+  const [term, setTerm] = useState("");
+  const [def, setDef] = useState("");
+  useEffect(() => { if (open) { setTerm(""); setDef(""); } }, [open]);
+  const valid = term.trim().length > 0 && def.trim().length > 0;
+  const save = () => { if (!valid) return; onSave(term.trim(), def.trim()); setTerm(""); setDef(""); };
+  return (
+    <Modal open={open} onClose={onClose}>
+      <ModalHeader title={`Vokabel hinzufügen${subjectName ? ` – ${subjectName}` : ""}`} onClose={onClose} />
+      <div className="px-5 pb-5">
+        <Field label="Vokabel"><input autoFocus className="sp-input w-full px-3 py-2.5 text-sm" value={term} onChange={(e) => setTerm(e.target.value)} placeholder="z.B. puella" onKeyDown={(e) => e.key === "Enter" && valid && save()} /></Field>
+        <Field label="Übersetzung"><input className="sp-input w-full px-3 py-2.5 text-sm" value={def} onChange={(e) => setDef(e.target.value)} placeholder="z.B. das Mädchen" onKeyDown={(e) => e.key === "Enter" && valid && save()} /></Field>
+        <button onClick={save} disabled={!valid} className="sp-btn-primary w-full py-3 text-sm disabled:opacity-40 flex items-center justify-center gap-1.5"><Plus size={15} />Hinzufügen</button>
+      </div>
+    </Modal>
+  );
+}
+
 function VocabPage({ data, setData, subjects }) {
   const languageSubjects = useMemo(() => subjects.filter((s) => isLanguageSubject(s.name)), [subjects]);
   const [activeLangId, setActiveLangId] = useState(languageSubjects[0]?.id || null);
   const [scope, setScope] = useState("all"); // all | recent
   const [direction, setDirection] = useState("forward"); // forward = Vokabel->Übersetzung
   const [game, setGame] = useState(null);
+  const [addVocabOpen, setAddVocabOpen] = useState(false);
 
   useEffect(() => {
     if (!languageSubjects.find((s) => s.id === activeLangId)) setActiveLangId(languageSubjects[0]?.id || null);
@@ -3925,6 +3982,22 @@ function VocabPage({ data, setData, subjects }) {
   }));
 
   const exitGame = () => setGame(null);
+
+  const addManualVocab = (term, def) => {
+    const newTerm = { id: uid(), term, def, srsBox: 1, srsDue: todayISO() };
+    setData((d) => {
+      const existing = d.entries.find((e) => e.subjectId === activeSubject.id && e.manualVocab === true);
+      if (existing) {
+        return { ...d, entries: d.entries.map((e) => e.id === existing.id ? { ...e, terms: [...e.terms, newTerm] } : e) };
+      }
+      const created = {
+        id: uid(), subjectId: activeSubject.id, date: todayISO(), manualVocab: true, createdAt: Date.now(),
+        images: [], image: null, documents: [], ocrText: "",
+        summary: "Manuell hinzugefügte Vokabeln", bullets: [], terms: [newTerm], formulas: [], merkkasten: "",
+      };
+      return { ...d, entries: [...d.entries, created] };
+    });
+  };
 
   if (languageSubjects.length === 0 || !activeSubject) {
     return (
@@ -3969,6 +4042,7 @@ function VocabPage({ data, setData, subjects }) {
                 <Repeat size={12} />{direction === "forward" ? "Vokabel → Übersetzung" : "Übersetzung → Vokabel"}
               </button>
             </div>
+            <button onClick={() => setAddVocabOpen(true)} className="sp-btn-secondary px-3 py-1.5 text-xs flex items-center gap-1.5 ml-auto"><Plus size={13} />Vokabel hinzufügen</button>
           </div>
           <p className="text-xs mb-4" style={{ color: "var(--text-faint)" }}>{terms.length} Vokabel{terms.length === 1 ? "" : "n"} verfügbar</p>
 
@@ -4008,6 +4082,7 @@ function VocabPage({ data, setData, subjects }) {
           <LearnSession subjectId={activeSubject.id} entries={scopedEntries} onUpdateTerm={updateTermSrs} onExit={exitGame} />
         </div>
       )}
+      <AddVocabModal open={addVocabOpen} onClose={() => setAddVocabOpen(false)} onSave={addManualVocab} subjectName={activeSubject.name} />
     </div>
   );
 }
@@ -4559,6 +4634,7 @@ function sanitizeEntries(raw) {
     id: e.id || uid(),
     subjectId: e.subjectId,
     date: typeof e.date === "string" ? e.date : todayISO(),
+    manualVocab: e.manualVocab === true,
     images: Array.isArray(e.images) ? e.images : (e.image ? [e.image] : []),
     image: e.image || (Array.isArray(e.images) ? e.images[0] : null) || null,
     documents: Array.isArray(e.documents) ? e.documents.filter((d) => d && typeof d.dataUrl === "string").map((d) => ({ name: d.name || "Dokument.pdf", dataUrl: d.dataUrl })) : [],
@@ -4607,7 +4683,7 @@ function sanitizeSubjects(raw) {
   return raw.filter((s) => s && s.id && s.name).map((s) => ({
     id: s.id, name: s.name, color: s.color || SUBJECT_PALETTE[0],
     quizFrequency: s.quizFrequency === "frequent" ? "frequent" : "occasional",
-    weightSchriftlich: (typeof s.weightSchriftlich === "number" && s.weightSchriftlich >= 0 && s.weightSchriftlich <= 100) ? s.weightSchriftlich : 50,
+    weightSchriftlich: (typeof s.weightSchriftlich === "number" && s.weightSchriftlich >= 0 && s.weightSchriftlich <= 100) ? s.weightSchriftlich : 66.67,
   }));
 }
 
@@ -4683,7 +4759,7 @@ function OnboardingWizard({ onComplete }) {
   };
 
   const buildSubjects = () => selectedSubjects.map((name, i) => ({
-    id: uid(), name, color: SUBJECT_PALETTE[i % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 50,
+    id: uid(), name, color: SUBJECT_PALETTE[i % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 66.67,
   }));
 
   const finish = (startPage) => onComplete({ profile, subjects: buildSubjects(), schedule: [], startPage });
@@ -4830,12 +4906,19 @@ function StudyPilotAppInner() {
           try { loadedData[k] = r.value ? JSON.parse(r.value) : null; } catch { loadedData[k] = null; }
         }
         let subjects = sanitizeSubjects(loadedData.subjects);
+        // Einmalige Migration: der alte Default (50/50) wird auf die in Deutschland übliche
+        // 2:1-Gewichtung (schriftlich zählt doppelt) umgestellt - aber nur EINMAL, damit ein
+        // späterer bewusster Nutzer-Klick auf "1:1" danach nicht wieder überschrieben wird.
+        const gradeWeightMigrated = loadedData.settings?.migratedGradeWeight66 === true;
+        if (!gradeWeightMigrated) {
+          subjects = subjects.map((s) => s.weightSchriftlich === 50 ? { ...s, weightSchriftlich: 66.67 } : s);
+        }
         let schedule = sanitizeSchedule(loadedData.schedule);
         // Migration: bestehende Nutzer mit echten Fächern gelten automatisch als "onboarded",
         // auch wenn das Flag selbst (aus einer Version vor diesem Update) noch fehlt.
         const alreadyOnboarded = loadedData.settings?.onboarded === true || subjects.length > 0;
         setData({
-          settings: { ...DEFAULT_SETTINGS, ...(loadedData.settings || {}), onboarded: alreadyOnboarded },
+          settings: { ...DEFAULT_SETTINGS, ...(loadedData.settings || {}), onboarded: alreadyOnboarded, migratedGradeWeight66: true },
           subjects,
           schedule: schedule || [],
           exams: sanitizeExams(loadedData.exams),
@@ -4882,7 +4965,7 @@ function StudyPilotAppInner() {
   const goPage = (p) => { setPage(p); setMobileMenuOpen(false); window.scrollTo(0, 0); };
   const openUpload = (subjectId) => { setUploadDefaultSubject(subjectId || null); setUploadOpen(true); };
 
-  const addSubject = (name) => setData((d) => ({ ...d, subjects: [...d.subjects, { id: uid(), name, color: SUBJECT_PALETTE[d.subjects.length % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 50 }] }));
+  const addSubject = (name) => setData((d) => ({ ...d, subjects: [...d.subjects, { id: uid(), name, color: SUBJECT_PALETTE[d.subjects.length % SUBJECT_PALETTE.length], quizFrequency: "occasional", weightSchriftlich: 66.67 }] }));
   const saveEntry = (entry) => setData((d) => ({ ...d, entries: [...d.entries, entry] }));
 
   const navResult = (r) => {
