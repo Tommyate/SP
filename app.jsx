@@ -2177,7 +2177,31 @@ function Flashcard({ term, def }) {
   );
 }
 
+function VocabFlashcard({ term, def, onRate }) {
+  const [rated, setRated] = useState(null); // null | true | false
+  const rate = (knewIt) => { onRate(knewIt); setRated(knewIt); };
+  return (
+    <div>
+      <Flashcard term={term} def={def} />
+      <div className="flex gap-1.5 mt-2">
+        <button onClick={() => rate(false)} className="flex-1 sp-btn-secondary py-1.5 text-xs" style={rated === false ? { borderColor: "var(--rose)", color: "var(--rose)" } : {}}>✗ Nicht gewusst</button>
+        <button onClick={() => rate(true)} className="flex-1 sp-btn-secondary py-1.5 text-xs" style={rated === true ? { borderColor: "var(--teal)", color: "var(--teal)" } : {}}>✓ Gewusst</button>
+      </div>
+    </div>
+  );
+}
+
 const SRS_INTERVALS = [1, 2, 4, 8, 16, 32, 64, 120]; // Tage je Box (Leitner-System) - bis zu ~4 Monate für echte Langzeit-Bindung
+
+// Leitner-Prinzip zentral an einer Stelle: bei richtig eine Box weiter (=seltener dran),
+// bei falsch zurück auf Box 1 (=morgen wieder dran). Von allen Spielen mit klarem
+// Richtig/Falsch-Signal genutzt, nicht nur vom dedizierten Lernmodus.
+function nextSrsState(box, wasCorrect) {
+  const nextBox = wasCorrect ? Math.min((box || 1) + 1, SRS_INTERVALS.length) : 1;
+  const interval = SRS_INTERVALS[nextBox - 1];
+  const due = new Date(); due.setDate(due.getDate() + interval);
+  return { srsBox: nextBox, srsDue: toLocalISODate(due) };
+}
 
 function LearnSession({ subjectId, entries, onUpdateTerm, onExit }) {
   const dueTerms = useMemo(() => {
@@ -2204,10 +2228,7 @@ function LearnSession({ subjectId, entries, onUpdateTerm, onExit }) {
 
   const answer = (knewIt) => {
     if (!current) return;
-    const box = knewIt ? Math.min((current.srsBox || 1) + 1, SRS_INTERVALS.length) : 1;
-    const interval = SRS_INTERVALS[box - 1];
-    const due = new Date(); due.setDate(due.getDate() + interval);
-    onUpdateTerm(current.entryId, current.id, { srsBox: box, srsDue: toLocalISODate(due) });
+    onUpdateTerm(current.entryId, current.id, nextSrsState(current.srsBox, knewIt));
     setStats((s) => ({ correct: s.correct + (knewIt ? 1 : 0), again: s.again + (knewIt ? 0 : 1) }));
     setFlipped(false);
     if (index + 1 < queue.length) setIndex(index + 1);
@@ -2434,13 +2455,13 @@ function sideOf(term, direction, side) {
   return isPromptTerm ? term.def : term.term;
 }
 
-function VocabMCGame({ terms, direction, onExit }) {
+function VocabMCGame({ terms, direction, onExit, onAnswer }) {
   const questions = useMemo(() => {
     const pool = shuffleArr(terms);
     return pool.map((t) => {
       const correct = sideOf(t, direction, "answer");
       const distractors = shuffleArr(pool.filter((o) => o !== t)).slice(0, 3).map((o) => sideOf(o, direction, "answer"));
-      return { prompt: sideOf(t, direction, "prompt"), correct, options: shuffleArr([correct, ...distractors]) };
+      return { term: t, prompt: sideOf(t, direction, "prompt"), correct, options: shuffleArr([correct, ...distractors]) };
     });
   }, [terms, direction]);
 
@@ -2453,7 +2474,9 @@ function VocabMCGame({ terms, direction, onExit }) {
   const choose = (opt) => {
     if (selected) return;
     setSelected(opt);
-    if (opt === q.correct) setScore((s) => s + 1);
+    const isCorrect = opt === q.correct;
+    if (isCorrect) setScore((s) => s + 1);
+    if (onAnswer) onAnswer(q.term, isCorrect);
   };
   const next = () => {
     setSelected(null);
@@ -2493,7 +2516,7 @@ function VocabMCGame({ terms, direction, onExit }) {
   );
 }
 
-function MatchingGame({ terms, direction, onExit }) {
+function MatchingGame({ terms, direction, onExit, onAnswer }) {
   const PAIR_COUNT = Math.min(6, terms.length);
   const [round, setRound] = useState(0);
   const pairs = useMemo(() => shuffleArr(terms).slice(0, PAIR_COUNT), [terms, round]);
@@ -2511,6 +2534,10 @@ function MatchingGame({ terms, direction, onExit }) {
     setMoves((m) => m + 1);
     if (selectedLeft.pairId === item.pairId) {
       setMatched((prev) => new Set([...prev, item.pairId]));
+      // Ein gefundenes Paar ist ein klares "richtig" fürs Leitner-Prinzip. Ein Fehlversuch
+      // wird bewusst NICHT gewertet, da bei zwei falsch kombinierten Kärtchen unklar ist,
+      // welcher der beiden Begriffe eigentlich nicht saß.
+      if (onAnswer) onAnswer(pairs[item.pairId], true);
       setSelectedLeft(null);
     } else {
       setWrongFlash(item.id);
@@ -2589,7 +2616,7 @@ function normalizeAnswer(str) {
   return (str || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function TypingGame({ terms, direction, onExit }) {
+function TypingGame({ terms, direction, onExit, onAnswer }) {
   const queue = useMemo(() => shuffleArr(terms), [terms]);
   const [index, setIndex] = useState(0);
   const [input, setInput] = useState("");
@@ -2606,6 +2633,7 @@ function TypingGame({ terms, direction, onExit }) {
     setChecked(isCorrect);
     if (isCorrect) setScore((s) => s + 1);
     else setMistakes((m) => [...m, { prompt: sideOf(current, direction, "prompt"), given: input, correct: correctAnswer }]);
+    if (onAnswer) onAnswer(current, isCorrect);
   };
   const next = () => {
     setInput(""); setChecked(null);
@@ -2661,7 +2689,7 @@ function TypingGame({ terms, direction, onExit }) {
   );
 }
 
-function SpeedRound({ terms, direction, onExit }) {
+function SpeedRound({ terms, direction, onExit, onAnswer }) {
   const DURATION = 60;
   const [started, setStarted] = useState(false);
   const [timeLeft, setTimeLeft] = useState(DURATION);
@@ -2676,7 +2704,7 @@ function SpeedRound({ terms, direction, onExit }) {
     const t = poolRef.current.pop();
     const correct = sideOf(t, direction, "answer");
     const distractors = shuffleArr(terms.filter((o) => o !== t)).slice(0, 3).map((o) => sideOf(o, direction, "answer"));
-    setCurrent({ prompt: sideOf(t, direction, "prompt"), correct, options: shuffleArr([correct, ...distractors]) });
+    setCurrent({ term: t, prompt: sideOf(t, direction, "prompt"), correct, options: shuffleArr([correct, ...distractors]) });
   };
 
   const start = () => { setScore(0); setWrong(0); setTimeLeft(DURATION); setFeedback(null); poolRef.current = shuffleArr(terms); nextQuestion(); setStarted(true); };
@@ -2691,6 +2719,7 @@ function SpeedRound({ terms, direction, onExit }) {
     if (feedback) return; // Klicks während des kurzen Feedback-Flashs ignorieren
     const isCorrect = opt === current.correct;
     if (isCorrect) setScore((s) => s + 1); else setWrong((w) => w + 1);
+    if (onAnswer) onAnswer(current.term, isCorrect);
     setFeedback({ chosen: opt, correct: current.correct });
     setTimeout(() => { setFeedback(null); nextQuestion(); }, 450);
   };
@@ -3975,11 +4004,17 @@ function VocabPage({ data, setData, subjects }) {
     [data.entries, activeSubject]
   );
   const scopedEntries = scope === "recent" ? entries.slice(0, 5) : entries;
-  const terms = useMemo(() => scopedEntries.flatMap((e) => e.terms || []).filter((t) => t.term && t.def), [scopedEntries]);
+  const terms = useMemo(
+    () => scopedEntries.flatMap((e) => (e.terms || []).map((t) => ({ ...t, entryId: e.id }))).filter((t) => t.term && t.def),
+    [scopedEntries]
+  );
 
   const updateTermSrs = (entryId, termId, patch) => setData((d) => ({
     ...d, entries: d.entries.map((e) => e.id !== entryId ? e : { ...e, terms: e.terms.map((t) => t.id === termId ? { ...t, ...patch } : t) }),
   }));
+  // Zentraler Leitner-Handler: von jedem Spiel mit klarem Richtig/Falsch-Signal genutzt,
+  // damit eine Vokabel überall im Vokabeln-Tab seltener wird, sobald sie sitzt.
+  const applySrs = (term, wasCorrect) => updateTermSrs(term.entryId, term.id, nextSrsState(term.srsBox, wasCorrect));
 
   const exitGame = () => setGame(null);
 
@@ -4069,14 +4104,14 @@ function VocabPage({ data, setData, subjects }) {
         <div>
           <button onClick={exitGame} className="text-sm flex items-center gap-1 sp-nav-item px-2 py-1 rounded-lg -ml-2 mb-3" style={{ color: "var(--text-muted)" }}><ArrowLeft size={14} />Beenden</button>
           <div className="grid sm:grid-cols-3 gap-4">
-            {terms.map((t, i) => <Flashcard key={i} term={sideOf(t, direction, "prompt")} def={sideOf(t, direction, "answer")} />)}
+            {terms.map((t, i) => <VocabFlashcard key={i} term={sideOf(t, direction, "prompt")} def={sideOf(t, direction, "answer")} onRate={(knewIt) => applySrs(t, knewIt)} />)}
           </div>
         </div>
       )}
-      {game === "mc" && <VocabMCGame terms={terms} direction={direction} onExit={exitGame} />}
-      {game === "match" && <MatchingGame terms={terms} direction={direction} onExit={exitGame} />}
-      {game === "type" && <TypingGame terms={terms} direction={direction} onExit={exitGame} />}
-      {game === "speed" && <SpeedRound terms={terms} direction={direction} onExit={exitGame} />}
+      {game === "mc" && <VocabMCGame terms={terms} direction={direction} onExit={exitGame} onAnswer={applySrs} />}
+      {game === "match" && <MatchingGame terms={terms} direction={direction} onExit={exitGame} onAnswer={applySrs} />}
+      {game === "type" && <TypingGame terms={terms} direction={direction} onExit={exitGame} onAnswer={applySrs} />}
+      {game === "speed" && <SpeedRound terms={terms} direction={direction} onExit={exitGame} onAnswer={applySrs} />}
       {game === "learn" && (
         <div>
           <LearnSession subjectId={activeSubject.id} entries={scopedEntries} onUpdateTerm={updateTermSrs} onExit={exitGame} />
