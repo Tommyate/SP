@@ -3968,34 +3968,143 @@ const VOCAB_GAMES = [
   { key: "learn", label: "Lernmodus (SRS)", icon: Flame },
 ];
 
-function AddVocabModal({ open, onClose, onSave, subjectName }) {
-  const [term, setTerm] = useState("");
-  const [def, setDef] = useState("");
-  useEffect(() => { if (open) { setTerm(""); setDef(""); } }, [open]);
-  const valid = term.trim().length > 0 && def.trim().length > 0;
-  const save = () => { if (!valid) return; onSave(term.trim(), def.trim()); setTerm(""); setDef(""); };
+function WortschatzUploadModal({ open, onClose, onSave, subjectName, settings, existingLabels }) {
+  const emptyRows = () => [{ term: "", def: "" }, { term: "", def: "" }];
+  const [label, setLabel] = useState("");
+  const [rows, setRows] = useState(emptyRows());
+  const [images, setImages] = useState([]);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState(null);
+  const cameraInputRef = useRef(null);
+  const galleryInputRef = useRef(null);
+
+  useEffect(() => {
+    if (open) { setLabel(""); setRows(emptyRows()); setImages([]); setError(null); }
+  }, [open]);
+
+  const handleFiles = async (files) => {
+    const arr = Array.from(files);
+    const previews = await Promise.all(arr.map((f) => downscaleImage(f)));
+    setImages((prev) => [...prev, ...previews].slice(0, 6));
+  };
+
+  const analyze = async () => {
+    if (images.length === 0) return;
+    setAnalyzing(true); setError(null);
+    try {
+      const ai = await runAIAnalysis({
+        provider: settings.aiProvider, openrouterApiKey: settings.openrouterApiKey, openrouterModel: settings.openrouterModel,
+        images, documents: [], subjectNames: [subjectName].filter(Boolean),
+      });
+      const extracted = (ai.terms || []).filter((t) => t.term && t.def).map((t) => ({ term: t.term, def: t.def }));
+      if (extracted.length === 0) { setError("Keine Vokabeln im Foto erkannt. Versuch ein schärferes Foto oder trag sie manuell ein."); return; }
+      setRows((prev) => {
+        const nonEmpty = prev.filter((r) => r.term.trim() || r.def.trim());
+        return [...nonEmpty, ...extracted, { term: "", def: "" }];
+      });
+      setImages([]);
+    } catch (e) {
+      setError(e.message || "Analyse fehlgeschlagen.");
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const updateRow = (i, field, value) => setRows(rows.map((r, idx) => idx === i ? { ...r, [field]: value } : r));
+  const addRow = () => setRows([...rows, { term: "", def: "" }]);
+  const removeRow = (i) => setRows(rows.filter((_, idx) => idx !== i));
+
+  const validRows = rows.filter((r) => r.term.trim() && r.def.trim());
+  const valid = label.trim().length > 0 && validRows.length > 0;
+
+  const save = () => {
+    if (!valid) return;
+    onSave(label.trim(), validRows.map((r) => ({ term: r.term.trim(), def: r.def.trim() })));
+    onClose();
+  };
+
   return (
-    <Modal open={open} onClose={onClose}>
-      <ModalHeader title={`Vokabel hinzufügen${subjectName ? ` – ${subjectName}` : ""}`} onClose={onClose} />
+    <Modal open={open} onClose={onClose} wide>
+      <ModalHeader title={`Wortschatz hochladen${subjectName ? ` – ${subjectName}` : ""}`} onClose={onClose} />
       <div className="px-5 pb-5">
-        <Field label="Vokabel"><input autoFocus className="sp-input w-full px-3 py-2.5 text-sm" value={term} onChange={(e) => setTerm(e.target.value)} placeholder="z.B. puella" onKeyDown={(e) => e.key === "Enter" && valid && save()} /></Field>
-        <Field label="Übersetzung"><input className="sp-input w-full px-3 py-2.5 text-sm" value={def} onChange={(e) => setDef(e.target.value)} placeholder="z.B. das Mädchen" onKeyDown={(e) => e.key === "Enter" && valid && save()} /></Field>
-        <button onClick={save} disabled={!valid} className="sp-btn-primary w-full py-3 text-sm disabled:opacity-40 flex items-center justify-center gap-1.5"><Plus size={15} />Hinzufügen</button>
+        <Field label="Bezeichnung">
+          <input autoFocus className="sp-input w-full px-3 py-2.5 text-sm" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="z.B. WS 1" />
+        </Field>
+        {existingLabels.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-3 -mt-2">
+            {existingLabels.map((l) => (
+              <button key={l} onClick={() => setLabel(l)} className="px-2.5 py-1 rounded-full text-xs" style={{ background: "var(--bg-soft)", color: "var(--text-faint)" }}>{l}</button>
+            ))}
+          </div>
+        )}
+
+        <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>Foto hochladen (optional – KI liest Vokabeln automatisch aus)</label>
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          <button type="button" onClick={() => cameraInputRef.current?.click()} className="rounded-xl border-2 border-dashed p-3 flex items-center justify-center gap-2 text-sm" style={{ borderColor: "var(--border-strong)", background: "var(--bg-soft)" }}>
+            <Camera size={16} /> Foto
+            <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }} />
+          </button>
+          <button type="button" onClick={() => galleryInputRef.current?.click()} className="rounded-xl border-2 border-dashed p-3 flex items-center justify-center gap-2 text-sm" style={{ borderColor: "var(--border-strong)", background: "var(--bg-soft)" }}>
+            <ImagePlus size={16} /> Galerie
+            <input ref={galleryInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }} />
+          </button>
+        </div>
+        {images.length > 0 && (
+          <div className="flex gap-2 flex-wrap mb-2">
+            {images.map((img, i) => (
+              <div key={i} className="relative">
+                <img src={img} className="w-14 h-14 rounded-lg object-cover" style={{ border: "1px solid var(--border)" }} />
+                <button onClick={() => setImages(images.filter((_, j) => j !== i))} className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center" style={{ background: "var(--rose)", color: "#fff" }}><X size={9} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+        {images.length > 0 && (
+          <button onClick={analyze} disabled={analyzing} className="sp-btn-secondary w-full py-2 text-xs mb-4 flex items-center justify-center gap-1.5 disabled:opacity-50">
+            {analyzing ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+            {analyzing ? "Wird analysiert..." : "Vokabeln aus Foto lesen"}
+          </button>
+        )}
+        {error && <div className="sp-card p-2.5 mb-3 text-xs" style={{ background: "var(--rose-soft)", color: "var(--rose)" }}>{error}</div>}
+
+        <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>Vokabeln {rows.some((r) => r.term || r.def) && "(prüfen & ergänzen)"}</label>
+        <div className="space-y-2 mb-2 max-h-64 overflow-y-auto sp-scroll pr-1">
+          {rows.map((row, i) => (
+            <div key={i} className="flex gap-2">
+              <input className="sp-input flex-1 min-w-0 px-2.5 py-2 text-sm" placeholder="Vokabel" value={row.term} onChange={(e) => updateRow(i, "term", e.target.value)} />
+              <input className="sp-input flex-1 min-w-0 px-2.5 py-2 text-sm" placeholder="Übersetzung" value={row.def} onChange={(e) => updateRow(i, "def", e.target.value)} />
+              <button onClick={() => removeRow(i)} className="shrink-0"><X size={15} style={{ color: "var(--text-faint)" }} /></button>
+            </div>
+          ))}
+        </div>
+        <button onClick={addRow} className="text-xs font-medium mb-4 flex items-center gap-1" style={{ color: "var(--accent)" }}><Plus size={13} />Zeile hinzufügen</button>
+
+        <button onClick={save} disabled={!valid} className="sp-btn-primary w-full py-3 text-sm disabled:opacity-40 flex items-center justify-center gap-1.5">
+          <Plus size={15} />Wortschatz speichern ({validRows.length} Vokabel{validRows.length === 1 ? "" : "n"})
+        </button>
       </div>
     </Modal>
   );
 }
 
+// Sortiert Wortschatz-Bezeichnungen "natürlich" (WS 2 vor WS 10), nicht alphabetisch.
+function wortschatzSort(a, b) {
+  const numA = parseInt((a.match(/\d+/) || [])[0], 10);
+  const numB = parseInt((b.match(/\d+/) || [])[0], 10);
+  if (!isNaN(numA) && !isNaN(numB) && numA !== numB) return numA - numB;
+  return a.localeCompare(b, "de");
+}
+
 function VocabPage({ data, setData, subjects }) {
   const languageSubjects = useMemo(() => subjects.filter((s) => isLanguageSubject(s.name)), [subjects]);
   const [activeLangId, setActiveLangId] = useState(languageSubjects[0]?.id || null);
-  const [scope, setScope] = useState("all"); // all | recent
+  const [selectedLabels, setSelectedLabels] = useState(null); // null = alle ausgewählt (Default), sonst Set<string>
   const [direction, setDirection] = useState("forward"); // forward = Vokabel->Übersetzung
   const [game, setGame] = useState(null);
-  const [addVocabOpen, setAddVocabOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   useEffect(() => {
-    if (!languageSubjects.find((s) => s.id === activeLangId)) setActiveLangId(languageSubjects[0]?.id || null);
+    if (!languageSubjects.find((s) => s.id === activeLangId)) { setActiveLangId(languageSubjects[0]?.id || null); setSelectedLabels(null); }
   }, [languageSubjects]);
 
   const activeSubject = languageSubjects.find((s) => s.id === activeLangId) || languageSubjects[0] || null;
@@ -4003,11 +4112,26 @@ function VocabPage({ data, setData, subjects }) {
     () => activeSubject ? data.entries.filter((e) => e.subjectId === activeSubject.id).sort((a, b) => b.date.localeCompare(a.date)) : [],
     [data.entries, activeSubject]
   );
-  const scopedEntries = scope === "recent" ? entries.slice(0, 5) : entries;
+  const SONSTIGE = "Sonstige";
+  const wortschatzLabels = useMemo(
+    () => [...new Set(entries.map((e) => e.wortschatzLabel || SONSTIGE))].sort(wortschatzSort),
+    [entries]
+  );
+  const effectiveSelected = selectedLabels || new Set(wortschatzLabels);
+  const scopedEntries = entries.filter((e) => effectiveSelected.has(e.wortschatzLabel || SONSTIGE));
   const terms = useMemo(
     () => scopedEntries.flatMap((e) => (e.terms || []).map((t) => ({ ...t, entryId: e.id }))).filter((t) => t.term && t.def),
     [scopedEntries]
   );
+
+  const toggleLabel = (label) => setSelectedLabels((prev) => {
+    const current = prev || new Set(wortschatzLabels);
+    const next = new Set(current);
+    if (next.has(label)) next.delete(label); else next.add(label);
+    return next;
+  });
+  const selectAllLabels = () => setSelectedLabels(null);
+  const selectOnlyLabel = (label) => setSelectedLabels(new Set([label]));
 
   const updateTermSrs = (entryId, termId, patch) => setData((d) => ({
     ...d, entries: d.entries.map((e) => e.id !== entryId ? e : { ...e, terms: e.terms.map((t) => t.id === termId ? { ...t, ...patch } : t) }),
@@ -4018,20 +4142,16 @@ function VocabPage({ data, setData, subjects }) {
 
   const exitGame = () => setGame(null);
 
-  const addManualVocab = (term, def) => {
-    const newTerm = { id: uid(), term, def, srsBox: 1, srsDue: todayISO() };
-    setData((d) => {
-      const existing = d.entries.find((e) => e.subjectId === activeSubject.id && e.manualVocab === true);
-      if (existing) {
-        return { ...d, entries: d.entries.map((e) => e.id === existing.id ? { ...e, terms: [...e.terms, newTerm] } : e) };
-      }
-      const created = {
-        id: uid(), subjectId: activeSubject.id, date: todayISO(), manualVocab: true, createdAt: Date.now(),
-        images: [], image: null, documents: [], ocrText: "",
-        summary: "Manuell hinzugefügte Vokabeln", bullets: [], terms: [newTerm], formulas: [], merkkasten: "",
-      };
-      return { ...d, entries: [...d.entries, created] };
-    });
+  const saveWortschatz = (label, pairs) => {
+    const newTerms = pairs.map((p) => ({ id: uid(), term: p.term, def: p.def, srsBox: 1, srsDue: todayISO() }));
+    const created = {
+      id: uid(), subjectId: activeSubject.id, date: todayISO(), manualVocab: true, wortschatzLabel: label, createdAt: Date.now(),
+      images: [], image: null, documents: [], ocrText: "",
+      summary: `Wortschatz: ${label}`, bullets: [], terms: newTerms, formulas: [], merkkasten: "",
+    };
+    setData((d) => ({ ...d, entries: [...d.entries, created] }));
+    // Neuer Wortschatz soll direkt mit ausgewählt sein, falls gerade eine Teilauswahl aktiv war.
+    setSelectedLabels((prev) => prev === null ? null : new Set([...prev, label]));
   };
 
   if (languageSubjects.length === 0 || !activeSubject) {
@@ -4051,7 +4171,7 @@ function VocabPage({ data, setData, subjects }) {
         {languageSubjects.map((s) => (
           <button
             key={s.id}
-            onClick={() => { setActiveLangId(s.id); setGame(null); }}
+            onClick={() => { setActiveLangId(s.id); setGame(null); setSelectedLabels(null); }}
             className="px-4 py-2 rounded-full text-sm font-medium shrink-0 transition-all"
             style={{ background: activeSubject.id === s.id ? "var(--accent)" : "var(--bg-soft)", color: activeSubject.id === s.id ? "#fff" : "var(--text-muted)" }}
           >
@@ -4062,27 +4182,42 @@ function VocabPage({ data, setData, subjects }) {
 
       {!game && (
         <>
-          <div className="sp-card p-3.5 mb-4 flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Umfang:</span>
-              <div className="sp-btn-secondary p-1 flex text-xs" style={{ borderRadius: 999 }}>
-                {[{ key: "all", label: "Alle" }, { key: "recent", label: "Neueste" }].map((o) => (
-                  <button key={o.key} onClick={() => setScope(o.key)} className="px-3 py-1.5 rounded-full transition-all" style={{ background: scope === o.key ? "var(--accent)" : "transparent", color: scope === o.key ? "#fff" : "var(--text-muted)" }}>{o.label}</button>
-                ))}
+          <div className="sp-card p-3.5 mb-4">
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <span className="text-xs font-medium shrink-0" style={{ color: "var(--text-muted)" }}>Wortschätze:</span>
+              {wortschatzLabels.map((label) => {
+                const active = effectiveSelected.has(label);
+                return (
+                  <button
+                    key={label}
+                    onClick={() => toggleLabel(label)}
+                    onDoubleClick={() => selectOnlyLabel(label)}
+                    className="px-3 py-1.5 rounded-full text-xs font-medium transition-all"
+                    style={{ background: active ? "var(--accent)" : "var(--bg-soft)", color: active ? "#fff" : "var(--text-muted)" }}
+                    title="Doppelklick: nur diesen Wortschatz auswählen"
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+              {wortschatzLabels.length > 1 && (
+                <button onClick={selectAllLabels} className="text-xs font-medium underline" style={{ color: "var(--text-faint)" }}>Alle</button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Richtung:</span>
+                <button onClick={() => setDirection((d) => d === "forward" ? "reverse" : "forward")} className="sp-btn-secondary px-3 py-1.5 text-xs flex items-center gap-1.5">
+                  <Repeat size={12} />{direction === "forward" ? "Vokabel → Übersetzung" : "Übersetzung → Vokabel"}
+                </button>
               </div>
+              <button onClick={() => setUploadOpen(true)} className="sp-btn-secondary px-3 py-1.5 text-xs flex items-center gap-1.5 ml-auto"><Plus size={13} />Wortschatz hochladen</button>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Richtung:</span>
-              <button onClick={() => setDirection((d) => d === "forward" ? "reverse" : "forward")} className="sp-btn-secondary px-3 py-1.5 text-xs flex items-center gap-1.5">
-                <Repeat size={12} />{direction === "forward" ? "Vokabel → Übersetzung" : "Übersetzung → Vokabel"}
-              </button>
-            </div>
-            <button onClick={() => setAddVocabOpen(true)} className="sp-btn-secondary px-3 py-1.5 text-xs flex items-center gap-1.5 ml-auto"><Plus size={13} />Vokabel hinzufügen</button>
           </div>
           <p className="text-xs mb-4" style={{ color: "var(--text-faint)" }}>{terms.length} Vokabel{terms.length === 1 ? "" : "n"} verfügbar</p>
 
           {terms.length === 0 ? (
-            <EmptyState icon={Languages} title="Noch keine Vokabeln erfasst" subtitle="Lade Hefteinträge oder Vokabellisten für dieses Fach hoch, damit StudyPilot Begriffe erkennt." />
+            <EmptyState icon={Languages} title="Noch keine Vokabeln erfasst" subtitle="Lade einen Wortschatz hoch (Foto oder manuell), damit StudyPilot Begriffe erkennt." />
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {VOCAB_GAMES.map((g) => {
@@ -4117,7 +4252,7 @@ function VocabPage({ data, setData, subjects }) {
           <LearnSession subjectId={activeSubject.id} entries={scopedEntries} onUpdateTerm={updateTermSrs} onExit={exitGame} />
         </div>
       )}
-      <AddVocabModal open={addVocabOpen} onClose={() => setAddVocabOpen(false)} onSave={addManualVocab} subjectName={activeSubject.name} />
+      <WortschatzUploadModal open={uploadOpen} onClose={() => setUploadOpen(false)} onSave={saveWortschatz} subjectName={activeSubject.name} settings={data.settings} existingLabels={wortschatzLabels.filter((l) => l !== SONSTIGE)} />
     </div>
   );
 }
@@ -4670,6 +4805,7 @@ function sanitizeEntries(raw) {
     subjectId: e.subjectId,
     date: typeof e.date === "string" ? e.date : todayISO(),
     manualVocab: e.manualVocab === true,
+    wortschatzLabel: typeof e.wortschatzLabel === "string" ? e.wortschatzLabel.trim() : "",
     images: Array.isArray(e.images) ? e.images : (e.image ? [e.image] : []),
     image: e.image || (Array.isArray(e.images) ? e.images[0] : null) || null,
     documents: Array.isArray(e.documents) ? e.documents.filter((d) => d && typeof d.dataUrl === "string").map((d) => ({ name: d.name || "Dokument.pdf", dataUrl: d.dataUrl })) : [],
