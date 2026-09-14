@@ -2470,15 +2470,18 @@ function VocabMCGame({ terms, direction, onExit, onAnswer }) {
   const [score, setScore] = useState(0);
   const [done, setDone] = useState(false);
   const q = questions[index];
+  const selectedRef = useRef(null); // synchroner Schutz gegen doppelt ausgelöste Taps, siehe TypingGame
 
   const choose = (opt) => {
-    if (selected) return;
+    if (selectedRef.current) return;
+    selectedRef.current = opt;
     setSelected(opt);
     const isCorrect = opt === q.correct;
     if (isCorrect) setScore((s) => s + 1);
     if (onAnswer) onAnswer(q.term, isCorrect);
   };
   const next = () => {
+    selectedRef.current = null;
     setSelected(null);
     if (index + 1 < questions.length) setIndex(index + 1); else setDone(true);
   };
@@ -2527,13 +2530,15 @@ function MatchingGame({ terms, direction, onExit, onAnswer }) {
   const [matched, setMatched] = useState(new Set());
   const [wrongFlash, setWrongFlash] = useState(null);
   const [moves, setMoves] = useState(0);
+  const matchedRef = useRef(new Set()); // synchroner Schutz gegen doppelt ausgelöste Taps, siehe TypingGame
 
-  const pickLeft = (item) => { if (matched.has(item.pairId)) return; setSelectedLeft(item); };
+  const pickLeft = (item) => { if (matchedRef.current.has(item.pairId)) return; setSelectedLeft(item); };
   const pickRight = (item) => {
-    if (matched.has(item.pairId) || !selectedLeft) return;
+    if (matchedRef.current.has(item.pairId) || !selectedLeft) return;
     setMoves((m) => m + 1);
     if (selectedLeft.pairId === item.pairId) {
-      setMatched((prev) => new Set([...prev, item.pairId]));
+      matchedRef.current = new Set([...matchedRef.current, item.pairId]);
+      setMatched(matchedRef.current);
       // Ein gefundenes Paar ist ein klares "richtig" fürs Leitner-Prinzip. Ein Fehlversuch
       // wird bewusst NICHT gewertet, da bei zwei falsch kombinierten Kärtchen unklar ist,
       // welcher der beiden Begriffe eigentlich nicht saß.
@@ -2557,7 +2562,7 @@ function MatchingGame({ terms, direction, onExit, onAnswer }) {
         <p className="sp-font-display font-semibold text-lg mb-1">Alle {PAIR_COUNT} Paare gefunden!</p>
         <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>{moves} Versuche gebraucht</p>
         <div className="flex gap-2 justify-center">
-          <button onClick={() => { setRound((r) => r + 1); setMatched(new Set()); setMoves(0); }} className="sp-btn-secondary px-4 py-2.5 text-sm flex items-center gap-1.5"><RotateCcw size={14} />Neue Runde</button>
+          <button onClick={() => { setRound((r) => r + 1); matchedRef.current = new Set(); setMatched(new Set()); setMoves(0); }} className="sp-btn-secondary px-4 py-2.5 text-sm flex items-center gap-1.5"><RotateCcw size={14} />Neue Runde</button>
           <button onClick={onExit} className="sp-btn-primary px-4 py-2.5 text-sm">Zurück</button>
         </div>
       </div>
@@ -2625,17 +2630,25 @@ function TypingGame({ terms, direction, onExit, onAnswer }) {
   const [score, setScore] = useState(0);
   const [done, setDone] = useState(false);
   const current = queue[index];
+  // Synchroner Spiegel von `checked`: manche mobilen Tastaturen lösen "Enter" doppelt aus
+  // (z.B. Keydown + eine Art Submit). Ein zweiter, fast gleichzeitiger Aufruf würde über die
+  // React-State-Closure noch den ALTEN Stand ("checked===null") sehen und versehentlich zur
+  // nächsten Vokabel springen, bevor die erste Antwort überhaupt sichtbar war. Die Ref wird
+  // sofort (synchron) aktualisiert und verhindert das zuverlässig.
+  const checkedRef = useRef(null);
 
-  const check = () => {
-    if (checked !== null) { next(); return; }
+  const submit = () => {
+    if (checkedRef.current !== null) return; // bereits geprüft - wartet auf expliziten "Weiter"-Klick
     const correctAnswer = sideOf(current, direction, "answer");
     const isCorrect = normalizeAnswer(input) === normalizeAnswer(correctAnswer);
+    checkedRef.current = isCorrect;
     setChecked(isCorrect);
     if (isCorrect) setScore((s) => s + 1);
     else setMistakes((m) => [...m, { prompt: sideOf(current, direction, "prompt"), given: input, correct: correctAnswer }]);
     if (onAnswer) onAnswer(current, isCorrect);
   };
   const next = () => {
+    checkedRef.current = null;
     setInput(""); setChecked(null);
     if (index + 1 < queue.length) setIndex(index + 1); else setDone(true);
   };
@@ -2679,12 +2692,12 @@ function TypingGame({ terms, direction, onExit, onAnswer }) {
         className="sp-input w-full px-3.5 py-3 text-sm mb-3"
         value={input}
         onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && check()}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
         disabled={checked !== null}
         style={checked === true ? { borderColor: "var(--teal)" } : checked === false ? { borderColor: "var(--rose)" } : {}}
       />
       {checked === false && <p className="text-sm mb-3" style={{ color: "var(--rose)" }}>Richtig wäre: {sideOf(current, direction, "answer")}</p>}
-      <button onClick={check} className="sp-btn-primary w-full py-3 text-sm">{checked === null ? "Prüfen" : index + 1 < queue.length ? "Weiter" : "Ergebnis anzeigen"}</button>
+      <button onClick={checked === null ? submit : next} className="sp-btn-primary w-full py-3 text-sm">{checked === null ? "Prüfen" : index + 1 < queue.length ? "Weiter" : "Ergebnis anzeigen"}</button>
     </div>
   );
 }
@@ -2698,6 +2711,7 @@ function SpeedRound({ terms, direction, onExit, onAnswer }) {
   const [current, setCurrent] = useState(null);
   const [feedback, setFeedback] = useState(null); // { chosen, correct } | null - kurzer Flash vor der nächsten Frage
   const poolRef = useRef([]);
+  const feedbackRef = useRef(null); // synchroner Schutz gegen doppelt ausgelöste Taps, siehe TypingGame
 
   const nextQuestion = () => {
     if (poolRef.current.length === 0) poolRef.current = shuffleArr(terms);
@@ -2707,7 +2721,7 @@ function SpeedRound({ terms, direction, onExit, onAnswer }) {
     setCurrent({ term: t, prompt: sideOf(t, direction, "prompt"), correct, options: shuffleArr([correct, ...distractors]) });
   };
 
-  const start = () => { setScore(0); setWrong(0); setTimeLeft(DURATION); setFeedback(null); poolRef.current = shuffleArr(terms); nextQuestion(); setStarted(true); };
+  const start = () => { setScore(0); setWrong(0); setTimeLeft(DURATION); setFeedback(null); feedbackRef.current = null; poolRef.current = shuffleArr(terms); nextQuestion(); setStarted(true); };
 
   useEffect(() => {
     if (!started || timeLeft <= 0) return;
@@ -2716,12 +2730,13 @@ function SpeedRound({ terms, direction, onExit, onAnswer }) {
   }, [started, timeLeft]);
 
   const choose = (opt) => {
-    if (feedback) return; // Klicks während des kurzen Feedback-Flashs ignorieren
+    if (feedbackRef.current) return; // Klicks während des kurzen Feedback-Flashs ignorieren
     const isCorrect = opt === current.correct;
     if (isCorrect) setScore((s) => s + 1); else setWrong((w) => w + 1);
     if (onAnswer) onAnswer(current.term, isCorrect);
-    setFeedback({ chosen: opt, correct: current.correct });
-    setTimeout(() => { setFeedback(null); nextQuestion(); }, 450);
+    feedbackRef.current = { chosen: opt, correct: current.correct };
+    setFeedback(feedbackRef.current);
+    setTimeout(() => { feedbackRef.current = null; setFeedback(null); nextQuestion(); }, 450);
   };
 
   if (terms.length < 4) return <EmptyState icon={Timer} title="Mindestens 4 Vokabeln nötig" />;
