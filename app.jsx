@@ -201,6 +201,14 @@ function isLanguageSubject(name) {
   return LANGUAGE_KEYS.some((k) => key.includes(k));
 }
 
+// Rechenfächer: hier reicht reines Begriffe-Abfragen nicht - eine echte Übungsprüfung
+// braucht konkrete Rechen-/Anwendungsaufgaben mit echten Zahlen, keine bloßen Merksätze.
+const CALC_SUBJECT_KEYS = ["mathe", "mathematik", "chemie", "physik"];
+function isCalcSubject(name) {
+  const key = (name || "").toLowerCase();
+  return CALC_SUBJECT_KEYS.some((k) => key.includes(k));
+}
+
 const EXAM_TYPES = ["Abfrage", "Ex", "Schulaufgabe", "Referat"];
 const EXAM_TYPE_META = {
   Abfrage: { color: "amber", verb: "Letzte Stunde intensiv wiederholen" },
@@ -819,14 +827,17 @@ async function runTutorChat({ provider, openrouterApiKey, openrouterModel, subje
 
 /* Prüfungssimulation: KI erstellt Fragen aus dem eigenen Stoff, korrigiert danach die Antworten --- */
 function buildExamGenerationPrompt(subjectName, examType, contextText) {
-  const countHint = examType === "Schulaufgabe" ? "6-8" : examType === "Ex" ? "4-5" : "3-4";
+  const countHint = examType === "Schulaufgabe" ? "6-8" : examType === "Ex" ? "4-5" : examType === "Schnellprüfung" ? "5-6" : "3-4";
+  const calcInstruction = isCalcSubject(subjectName)
+    ? `\nWICHTIG für dieses Fach: Frag NICHT nur Begriffe, Definitionen oder Merksätze ab. Mindestens die Hälfte der Fragen MUSS konkrete Beispielaufgaben mit echten Zahlen/Werten zum Rechnen bzw. Anwenden sein (z.B. "Löse die Gleichung: 3x + 7 = 22" oder "Berechne die Stoffmenge von 12g Kohlenstoff" oder "Berechne die Geschwindigkeit nach 4 Sekunden bei einer Beschleunigung von 2 m/s²") - direkt aus den Aufgabentypen/Beispielen im Stoff oben abgeleitet, mit denselben Themen aber anderen Zahlenwerten als im Original.`
+    : "";
   return `Du bist Lehrer für das Fach "${subjectName}" und erstellst eine ${examType}-Übungsprüfung NUR auf Basis des folgenden Stoffs aus dem eigenen Unterricht der Schülerin/des Schülers:
 
 ---
 ${contextText || "(kein Stoff hinterlegt)"}
 ---
 
-Erstelle ${countHint} Prüfungsfragen, die den obigen Stoff wirklich abfragen (keine Fragen zu Themen, die dort nicht vorkommen). Mische wo sinnvoll Verständnisfragen, Definitionsfragen und (falls Formeln/Rechenwege vorkommen) Rechenaufgaben. Realistisches Prüfungsniveau für eine Schulklasse, nicht Universitätsniveau.
+Erstelle ${countHint} Prüfungsfragen, die den obigen Stoff wirklich abfragen (keine Fragen zu Themen, die dort nicht vorkommen). Mische wo sinnvoll Verständnisfragen, Definitionsfragen und (falls Formeln/Rechenwege vorkommen) Rechenaufgaben. Realistisches Prüfungsniveau für eine Schulklasse, nicht Universitätsniveau.${calcInstruction}
 
 Antworte AUSSCHLIESSLICH mit einem validen JSON-Array (keine Codeblöcke, kein Fließtext) in diesem Format:
 [{"id":"q1","question":"Fragetext","maxPoints":10}]
@@ -1287,7 +1298,7 @@ function LearnPulse({ items, subjects, entries }) {
   );
 }
 
-function Dashboard({ data, subjects, onOpenSubject, onOpenExam, onUpload, onGoPage }) {
+function Dashboard({ data, subjects, onOpenSubject, onOpenExam, onUpload, onGoPage, onQuickExam }) {
   const plan = useMemo(() => computeLearningPlan({
     schedule: data.schedule, exams: data.exams, subjects, currentWeekType: data.settings.currentWeekType,
   }), [data.schedule, data.exams, subjects, data.settings.currentWeekType]);
@@ -1333,9 +1344,12 @@ function Dashboard({ data, subjects, onOpenSubject, onOpenExam, onUpload, onGoPa
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>{greeting}{firstName ? `, ${firstName}` : ""} 👋</p>
           <h1 className="sp-font-display font-bold text-[26px] sm:text-3xl mt-0.5">Dein Lernpuls heute</h1>
         </div>
-        <button onClick={onUpload} className="sp-btn-primary px-5 py-3 flex items-center gap-2 text-sm">
-          <Camera size={17} /> Hefteintrag hochladen
-        </button>
+        <div className="flex gap-2">
+          <button onClick={onQuickExam} className="sp-btn-secondary px-4 py-3 flex items-center gap-2 text-sm"><Zap size={16} />Schnellprüfung</button>
+          <button onClick={onUpload} className="sp-btn-primary px-5 py-3 flex items-center gap-2 text-sm">
+            <Camera size={17} /> Hefteintrag hochladen
+          </button>
+        </div>
       </div>
 
       {/* Hero */}
@@ -3594,7 +3608,204 @@ function ExamSimulation({ exam, subject, relevantEntries, settings, simState, on
   return null;
 }
 
-function ExamsPage({ data, setData, subjects, onOpenExam }) {
+function QuickExamPage({ subjects, settings, onBack }) {
+  const [step, setStep] = useState("setup"); // setup | generating | answering | grading | result
+  const [subjectId, setSubjectId] = useState(subjects[0]?.id || "");
+  const [images, setImages] = useState([]);
+  const [error, setError] = useState(null);
+  const [questions, setQuestions] = useState(null);
+  const [answers, setAnswers] = useState({});
+  const [grading, setGrading] = useState(null);
+  const [contextEntries, setContextEntries] = useState(null);
+  const cameraInputRef = useRef(null);
+  const galleryInputRef = useRef(null);
+
+  const subject = subjects.find((s) => s.id === subjectId);
+
+  const handleFiles = async (files) => {
+    const arr = Array.from(files);
+    const previews = await Promise.all(arr.map((f) => downscaleImage(f)));
+    setImages((prev) => [...prev, ...previews].slice(0, 6));
+  };
+
+  const generate = async () => {
+    if (images.length === 0 || !subject) return;
+    setStep("generating"); setError(null);
+    try {
+      const ai = await runAIAnalysis({
+        provider: settings.aiProvider, openrouterApiKey: settings.openrouterApiKey, openrouterModel: settings.openrouterModel,
+        images, documents: [], subjectNames: subjects.map((s) => s.name),
+      });
+      const synthetic = [{
+        date: todayISO(), summary: ai.summary || "", bullets: ai.bullets || [],
+        terms: ai.terms || [], formulas: ai.formulas || [], merkkasten: ai.merkkasten || "",
+      }];
+      setContextEntries(synthetic);
+      const qs = await runGenerateExam({
+        provider: settings.aiProvider, openrouterApiKey: settings.openrouterApiKey, openrouterModel: settings.openrouterModel,
+        contextEntries: synthetic, subjectName: subject.name, examType: "Schnellprüfung",
+      });
+      setQuestions(qs);
+      setAnswers({});
+      setStep("answering");
+    } catch (e) {
+      setError(e.message || "Prüfung konnte nicht erstellt werden.");
+      setStep("setup");
+    }
+  };
+
+  const submit = async () => {
+    setStep("grading"); setError(null);
+    try {
+      const items = questions.map((q) => ({ id: q.id, question: q.question, maxPoints: q.maxPoints, answer: answers[q.id] || "" }));
+      const g = await runGradeAnswers({
+        provider: settings.aiProvider, openrouterApiKey: settings.openrouterApiKey, openrouterModel: settings.openrouterModel,
+        subjectName: subject.name, contextEntries, items,
+      });
+      setGrading(g);
+      setStep("result");
+    } catch (e) {
+      setError(e.message || "Korrektur fehlgeschlagen.");
+      setStep("answering");
+    }
+  };
+
+  const restart = () => {
+    setStep("setup"); setImages([]); setQuestions(null); setAnswers({}); setGrading(null); setError(null); setContextEntries(null);
+  };
+
+  return (
+    <div className="sp-fade-in max-w-2xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
+      <button onClick={onBack} className="flex items-center gap-1.5 text-sm mb-4 sp-nav-item px-2 py-1 rounded-lg -ml-2" style={{ color: "var(--text-muted)" }}><ArrowLeft size={15} />Zurück</button>
+      <h1 className="sp-font-display font-bold text-2xl mb-1.5">Schnellprüfung</h1>
+      <p className="text-sm mb-6" style={{ color: "var(--text-muted)" }}>Arbeitsblätter hochladen, KI erstellt eine Prüfung NUR aus diesen Blättern und korrigiert sie danach.</p>
+
+      {step === "setup" && (
+        <>
+          {subjects.length === 0 ? (
+            <EmptyState icon={ClipboardCheck} title="Noch kein Fach angelegt" />
+          ) : (
+            <>
+              <Field label="Fach">
+                <select className="sp-input w-full px-3 py-2.5 text-sm" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}>
+                  {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </Field>
+
+              <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>Arbeitsblätter (1-6 Fotos)</label>
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <button type="button" onClick={() => cameraInputRef.current?.click()} className="rounded-2xl border-2 border-dashed p-5 flex flex-col items-center justify-center text-center gap-1.5" style={{ borderColor: "var(--border-strong)", background: "var(--bg-soft)" }}>
+                  <Camera size={22} style={{ color: "var(--text-faint)" }} />
+                  <p className="text-sm font-medium">Foto aufnehmen</p>
+                  <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }} />
+                </button>
+                <button type="button" onClick={() => galleryInputRef.current?.click()} className="rounded-2xl border-2 border-dashed p-5 flex flex-col items-center justify-center text-center gap-1.5" style={{ borderColor: "var(--border-strong)", background: "var(--bg-soft)" }}>
+                  <ImagePlus size={22} style={{ color: "var(--text-faint)" }} />
+                  <p className="text-sm font-medium">Aus Fotos wählen</p>
+                  <input ref={galleryInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }} />
+                </button>
+              </div>
+
+              {images.length > 0 && (
+                <div className="flex gap-2 flex-wrap mb-4">
+                  {images.map((img, i) => (
+                    <div key={i} className="relative">
+                      <img src={img} className="w-16 h-16 rounded-xl object-cover" style={{ border: "1px solid var(--border)" }} />
+                      <button onClick={() => setImages(images.filter((_, j) => j !== i))} className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full flex items-center justify-center" style={{ background: "var(--rose)", color: "#fff" }}><X size={11} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {error && <div className="sp-card p-3 mb-3 text-sm" style={{ background: "var(--rose-soft)", color: "var(--rose)" }}>{error}</div>}
+              <button onClick={generate} disabled={images.length === 0} className="sp-btn-primary w-full py-3 text-sm flex items-center justify-center gap-2 disabled:opacity-40">
+                <Sparkles size={16} />Prüfung erstellen
+              </button>
+            </>
+          )}
+        </>
+      )}
+
+      {step === "generating" && (
+        <div className="sp-card p-8 text-center">
+          <Loader2 size={28} className="animate-spin mx-auto mb-4" style={{ color: "var(--accent)" }} />
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>Arbeitsblätter werden gelesen und Prüfung erstellt...</p>
+        </div>
+      )}
+
+      {step === "answering" && questions && (
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>{questions.length} Fragen · {questions.reduce((s, q) => s + q.maxPoints, 0)} Punkte gesamt</p>
+            <button onClick={restart} className="text-xs" style={{ color: "var(--text-faint)" }}>Verwerfen</button>
+          </div>
+          <div className="space-y-4 mb-5">
+            {questions.map((q, i) => (
+              <div key={q.id} className="sp-card p-4" style={{ background: "var(--bg-soft)" }}>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-semibold" style={{ color: "var(--text-faint)" }}>FRAGE {i + 1}</p>
+                  <Chip color="muted">{q.maxPoints} P.</Chip>
+                </div>
+                <p className="text-sm font-medium mb-3">{q.question}</p>
+                <textarea
+                  className="sp-input w-full px-3 py-2.5 text-sm resize-none"
+                  rows={3}
+                  placeholder="Deine Antwort..."
+                  value={answers[q.id] || ""}
+                  onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
+                />
+              </div>
+            ))}
+          </div>
+          {error && <div className="sp-card p-3 mb-3 text-sm" style={{ background: "var(--rose-soft)", color: "var(--rose)" }}>{error}</div>}
+          <button onClick={submit} className="sp-btn-primary w-full py-3 text-sm flex items-center justify-center gap-2">
+            <FileCheck2 size={16} />Abgeben & korrigieren lassen
+          </button>
+        </div>
+      )}
+
+      {step === "grading" && (
+        <div className="sp-card p-8 text-center">
+          <Loader2 size={28} className="animate-spin mx-auto mb-4" style={{ color: "var(--accent)" }} />
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>Wird korrigiert...</p>
+        </div>
+      )}
+
+      {step === "result" && grading && (
+        <div>
+          <div className="flex items-center gap-4 mb-4 sp-card p-4" style={{ background: `${grading.overallScore >= 75 ? "var(--teal)" : grading.overallScore >= 45 ? "var(--amber)" : "var(--rose)"}14` }}>
+            <div className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0" style={{ background: "var(--bg-elevated)" }}>
+              <Award size={28} style={{ color: grading.overallScore >= 75 ? "var(--teal)" : grading.overallScore >= 45 ? "var(--amber)" : "var(--rose)" }} />
+            </div>
+            <div className="min-w-0">
+              <p className="sp-font-display font-bold text-2xl" style={{ color: grading.overallScore >= 75 ? "var(--teal)" : grading.overallScore >= 45 ? "var(--amber)" : "var(--rose)" }}>{grading.overallScore}%</p>
+              <p className="text-sm" style={{ color: "var(--text-muted)" }}>{grading.overallFeedback}</p>
+            </div>
+          </div>
+          <div className="space-y-3 mb-5">
+            {questions.map((q, i) => {
+              const pi = grading.perItem.find((p) => p.id === q.id) || { score: 0, maxScore: q.maxPoints, feedback: "" };
+              return (
+                <div key={q.id} className="sp-card p-4">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-xs font-semibold" style={{ color: "var(--text-faint)" }}>FRAGE {i + 1}</p>
+                    <Chip color={pi.score / pi.maxScore >= 0.75 ? "teal" : pi.score / pi.maxScore >= 0.45 ? "amber" : "rose"}>{pi.score}/{pi.maxScore} P.</Chip>
+                  </div>
+                  <p className="text-sm font-medium mb-1.5">{q.question}</p>
+                  <p className="text-xs mb-2 italic" style={{ color: "var(--text-muted)" }}>Deine Antwort: {answers[q.id] || "(keine)"}</p>
+                  <ScoreBar score={pi.score} maxScore={pi.maxScore} />
+                  {pi.feedback && <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>{pi.feedback}</p>}
+                </div>
+              );
+            })}
+          </div>
+          <button onClick={restart} className="sp-btn-secondary w-full py-2.5 text-sm flex items-center justify-center gap-2"><RotateCcw size={14} />Neue Schnellprüfung</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExamsPage({ data, setData, subjects, onOpenExam, onQuickExam }) {
   const [modalOpen, setModalOpen] = useState(false);
   const list = [...data.exams].sort((a, b) => a.date.localeCompare(b.date));
   const addExam = (exam) => setData((d) => ({ ...d, exams: [...d.exams, exam] }));
@@ -3614,9 +3825,12 @@ function ExamsPage({ data, setData, subjects, onOpenExam }) {
 
   return (
     <div className="sp-fade-in max-w-4xl mx-auto px-4 sm:px-6 pt-6 pb-24 sm:pb-10">
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
         <h1 className="sp-font-display font-bold text-2xl">Prüfungen</h1>
-        <button onClick={() => setModalOpen(true)} className="sp-btn-primary px-4 py-2.5 text-sm flex items-center gap-1.5"><Plus size={15} />Neu</button>
+        <div className="flex gap-2">
+          <button onClick={onQuickExam} className="sp-btn-secondary px-4 py-2.5 text-sm flex items-center gap-1.5"><Zap size={15} />Schnellprüfung</button>
+          <button onClick={() => setModalOpen(true)} className="sp-btn-primary px-4 py-2.5 text-sm flex items-center gap-1.5"><Plus size={15} />Neu</button>
+        </div>
       </div>
       {list.length === 0 ? (
         <EmptyState icon={ClipboardCheck} title="Keine Prüfungen eingetragen" subtitle="Füge Abfragen, Exen, Schulaufgaben oder Referate hinzu." action={<button onClick={() => setModalOpen(true)} className="sp-btn-primary px-4 py-2 text-sm">Prüfung hinzufügen</button>} />
@@ -4676,7 +4890,7 @@ function Sidebar({ page, onNav, settings }) {
           const Icon = item.icon;
           const active = page === item.key
             || (item.key === "subjects" && page === "subject")
-            || (item.key === "exams" && page === "examDetail")
+            || (item.key === "exams" && (page === "examDetail" || page === "quickexam"))
             || (item.key === "todo" && page === "focus");
           return (
             <button key={item.key} onClick={() => onNav(item.key)} className={`sp-nav-item flex items-center gap-3 px-3 py-2.5 text-sm ${active ? "active" : ""}`}>
@@ -4706,7 +4920,7 @@ function BottomNav({ page, onNav }) {
         const Icon = item.icon;
         const active = page === key
           || (key === "subjects" && page === "subject")
-          || (key === "exams" && page === "examDetail")
+          || (key === "exams" && (page === "examDetail" || page === "quickexam"))
           || (key === "todo" && page === "focus");
         return (
           <button key={key} onClick={() => onNav(key)} className="flex-1 flex flex-col items-center justify-center gap-0.5 py-2.5">
@@ -5209,7 +5423,7 @@ function StudyPilotAppInner() {
           </div>
 
           <StorageStatusBanner status={saveStatus} error={saveError} onGoBackup={() => goPage("settings")} />
-          {page === "dashboard" && <Dashboard data={data} subjects={subjects} onOpenSubject={openSubject} onOpenExam={openExam} onUpload={() => openUpload(null)} onGoPage={goPage} />}
+          {page === "dashboard" && <Dashboard data={data} subjects={subjects} onOpenSubject={openSubject} onOpenExam={openExam} onUpload={() => openUpload(null)} onGoPage={goPage} onQuickExam={() => goPage("quickexam")} />}
           {page === "todo" && <TodoPage data={data} subjects={subjects} onStartTodo={startTodo} />}
           {page === "focus" && focusTask && (
             <FocusView todo={focusTask} data={data} setData={setData} onExit={exitFocus} onOpenSubject={openSubject} />
@@ -5219,7 +5433,8 @@ function StudyPilotAppInner() {
           {page === "subject" && activeSubject && (
             <SubjectDetail key={activeSubject.id} subject={activeSubject} data={data} setData={setData} onBack={() => goPage("subjects")} onUpload={openUpload} />
           )}
-          {page === "exams" && <ExamsPage data={data} setData={setData} subjects={subjects} onOpenExam={openExam} />}
+          {page === "exams" && <ExamsPage data={data} setData={setData} subjects={subjects} onOpenExam={openExam} onQuickExam={() => goPage("quickexam")} />}
+          {page === "quickexam" && <QuickExamPage subjects={subjects} settings={data.settings} onBack={() => goPage("exams")} />}
           {page === "examDetail" && activeExam && (
             <ExamDetail key={activeExam.id} exam={activeExam} subjects={subjects} data={data} setData={setData} onBack={() => goPage("exams")} onOpenSubject={openSubject} />
           )}
